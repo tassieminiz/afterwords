@@ -50,6 +50,13 @@ HERMES_AGENT = "hermes"
 # Global fallback config (read from home dir)
 GLOBAL_AFTERWORDS = Path.home() / ".afterwords"
 
+# Voice names become archive filenames: no slashes, no leading dot.
+_VOICE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _is_voice_name(voice: str | None) -> bool:
+    return bool(voice) and _VOICE_NAME_RE.fullmatch(voice) is not None
+
 
 def strip_markdown(text: str) -> str:
     """Strip markdown formatting for cleaner TTS."""
@@ -135,11 +142,17 @@ def resolve_voice(context: dict) -> str | None:
     if cwd:
         project_aw = Path(cwd) / ".afterwords"
         voice = _read_afterwords(project_aw, HERMES_AGENT)
+        if voice and not _is_voice_name(voice):
+            log.warning("Ignoring invalid voice name in %s", project_aw)
+            voice = None
         if voice:
             log.info("Voice resolved from project .afterwords: %s (agent=%s, cwd=%s)", voice, HERMES_AGENT, cwd)
             return voice
 
     voice = _read_afterwords(GLOBAL_AFTERWORDS, HERMES_AGENT)
+    if voice and not _is_voice_name(voice):
+        log.warning("Ignoring invalid voice name in %s", GLOBAL_AFTERWORDS)
+        voice = None
     if voice:
         log.info("Voice resolved from global ~/.afterwords: %s (agent=%s)", voice, HERMES_AGENT)
         return voice
@@ -326,6 +339,8 @@ async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, sess
     """Inner implementation: synthesize chunk N+1 while playing chunk N."""
     tag = uuid.uuid4().hex[:8]
     archive_dir = Path.home() / ".hermes" / "tts-archive"
+    if not _is_voice_name(voice):
+        voice = None
     stamp = f"{voice or 'default'}-{_ts()}"
     archive_base = archive_dir / stamp
     # Write text sidecar (once)
