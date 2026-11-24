@@ -250,8 +250,9 @@ if [ -z "$(find voices -maxdepth 1 -name '*-ref.wav' -print -quit 2>/dev/null)" 
     VOICE_NAME=$(echo "$VOICE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
     [ -z "$VOICE_NAME" ] && VOICE_NAME="voice"
 
-    TMP_SEG="/tmp/voice-setup-segment-$$.wav"
-    TMPFILES+=("$TMP_SEG")
+    TMP_SEG_DIR=$(mktemp -d)
+    TMPFILES+=("$TMP_SEG_DIR")
+    TMP_SEG="$TMP_SEG_DIR/segment.wav"
 
     info "Extracting reference (${START_S}s → $((START_S+15))s)..."
     ffmpeg -y -i "$TMP_SRC" -ss "$START_S" -t 15 -ar 24000 -ac 1 "$TMP_SEG" 2>/dev/null
@@ -536,8 +537,7 @@ print('LINE=' + shlex.quote(d.get('text','')))
     # Split into sentence-boundary chunks and pipeline: synth-N → play-N → synth-N+1.
     # Latency-to-first-audio drops from ~30s (full blob) to ~2s (first chunk).
     CHUNK_SCRIPT="$HOME/.claude/hooks/chunk-text.py"
-    CHUNK_DIR="/tmp/claude-tts-chunks-$$"
-    mkdir -p "$CHUNK_DIR"
+    CHUNK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/claude-tts-chunks-XXXXXX") || { release_play_lock; continue; }
 
     # Collect chunks into numbered text files (Bash 3.2-compatible; no mapfile).
     NCHUNKS=0

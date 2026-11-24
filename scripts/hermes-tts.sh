@@ -26,12 +26,14 @@ if [ -n "$VOICE" ]; then
 fi
 
 # Fetch and play
-WAVFILE="/tmp/hermes-afterwords-$$.wav"
+WAV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hermes-afterwords-XXXXXX")
+trap 'rm -rf "$WAV_DIR"' EXIT
+WAVFILE="$WAV_DIR/out.wav"
 if curl -s --max-time 90 "$URL" -o "$WAVFILE" 2>/dev/null; then
     FILESIZE=$(stat -f%z "$WAVFILE" 2>/dev/null || echo 0)
     if [ "$FILESIZE" -gt 1000 ]; then
         # Trim silence like the original hook does
-        TRIMMED="/tmp/hermes-afterwords-trimmed-$$.wav"
+        TRIMMED="$WAV_DIR/trimmed.wav"
         if ffmpeg -y -ss 0.1 -i "$WAVFILE" -c copy "$TRIMMED" 2>/dev/null; then
             mv "$TRIMMED" "$WAVFILE"
         fi

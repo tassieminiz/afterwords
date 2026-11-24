@@ -436,12 +436,14 @@ else:
         local demo_text="The quick brown fox jumps over the lazy dog."
         local voices_list
         voices_list=$(echo "$HEALTH_JSON" | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin).get('voices', [])))")
+        local demo_dir
+        demo_dir=$(mktemp -d "${TMPDIR:-/tmp}/afterwords-demo-XXXXXX") || fail "Could not create a temporary directory"
 
         for v in $voices_list; do
             local encoded
             encoded=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))" "$demo_text")
             info "Playing ${BOLD}${v}${NC}..."
-            local wavfile="/tmp/afterwords-demo-$$.wav"
+            local wavfile="$demo_dir/demo.wav"
             if curl -s --max-time 90 "http://localhost:${PORT}/synthesize?text=${encoded}&voice=${v}" -o "$wavfile" 2>/dev/null; then
                 local filesize
                 filesize=$(stat -f%z "$wavfile" 2>/dev/null || echo 0)
@@ -455,6 +457,7 @@ else:
             fi
             rm -f "$wavfile"
         done
+        rm -rf "$demo_dir"
         echo
         ok "Demo complete"
     fi
