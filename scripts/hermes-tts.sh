@@ -26,12 +26,14 @@ if [ -n "$VOICE" ]; then
 fi
 
 # Fetch and play
-WAVFILE="/tmp/hermes-afterwords-$$.wav"
+WAVDIR=$(mktemp -d "${TMPDIR:-/tmp}/hermes-afterwords.XXXXXX")
+trap 'rm -rf "$WAVDIR"' EXIT
+WAVFILE="$WAVDIR/speech.wav"
 if curl -s --max-time 90 "$URL" -o "$WAVFILE" 2>/dev/null; then
     FILESIZE=$(stat -f%z "$WAVFILE" 2>/dev/null || echo 0)
     if [ "$FILESIZE" -gt 1000 ]; then
         # Trim silence like the original hook does
-        TRIMMED="/tmp/hermes-afterwords-trimmed-$$.wav"
+        TRIMMED="$WAVDIR/trimmed.wav"
         if ffmpeg -y -ss 0.1 -i "$WAVFILE" -c copy "$TRIMMED" 2>/dev/null; then
             mv "$TRIMMED" "$WAVFILE"
         fi
@@ -39,11 +41,9 @@ if curl -s --max-time 90 "$URL" -o "$WAVFILE" 2>/dev/null; then
 
         # Play audio (afplay is macOS default)
         [ -f "$MUTE_FILE" ] || afplay "$WAVFILE" 2>/dev/null || echo "Audio saved to $WAVFILE (could not play)"
-        rm -f "$WAVFILE"
         exit 0
     fi
 fi
 
-rm -f "$WAVFILE"
 echo "⚠️  TTS generation failed" >&2
 exit 1

@@ -14,7 +14,9 @@ set -euo pipefail
 TEXT="${1:?Usage: speak.sh \"text\" [voice]}"
 VOICE="${2:-}"
 PORT=7860
-OUT="/tmp/afterwords-output-$$.wav"
+OUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/afterwords-output.XXXXXX")
+trap 'rm -rf "$OUT_DIR"' EXIT
+OUT="$OUT_DIR/output.wav"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Resolve voice from .afterwords if not specified
@@ -77,10 +79,8 @@ HTTP_CODE=$(curl -s -w "%{http_code}" -o "$OUT" "$URL")
 if [ "$HTTP_CODE" != "200" ]; then
     echo "Synthesis failed (HTTP $HTTP_CODE):" >&2
     cat "$OUT" >&2
-    rm -f "$OUT"
     exit 1
 fi
 
 # Play
 afplay "$OUT"
-rm -f "$OUT"
