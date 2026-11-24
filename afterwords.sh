@@ -317,6 +317,26 @@ print(data.get('cloud_url', ''))
     fi
     CLOUD_API_KEY="${AFTERWORDS_API_KEY:-$CLOUD_API_KEY}"
     CLOUD_URL="${AFTERWORDS_CLOUD_URL:-$CLOUD_URL}"
+    check_cloud_key "$CLOUD_API_KEY"
+}
+
+check_cloud_key() {
+    case "$1" in
+        *$'\n'*|*$'\r'*) fail "API key must not contain line breaks" ;;
+    esac
+}
+
+# Process arguments are visible to every local account (macOS ps is setuid
+# root), so the bearer header goes to curl as a config on stdin, never argv.
+# printf is a builtin, so the key is not in any exec'd argument vector either.
+cloud_curl() {
+    local key="$1"; shift
+    case "$key" in
+        *$'\n'*|*$'\r'*) return 1 ;;
+    esac
+    key="${key//\\/\\\\}"
+    key="${key//\"/\\\"}"
+    printf 'header = "Authorization: Bearer %s"\n' "$key" | curl -K - "$@"
 }
 
 require_cloud_config() {
@@ -395,8 +415,7 @@ for v in data.get('voices', []):
             echo -e "  ${DIM}── cloud ─────────────────────────────────${NC}"
             echo
             local full_response http_code cloud_body
-            full_response=$(curl -s -w "\n%{http_code}" --max-time 15 \
-                -H "Authorization: Bearer $CLOUD_API_KEY" \
+            full_response=$(cloud_curl "$CLOUD_API_KEY" -s -w "\n%{http_code}" --max-time 15 \
                 "$CLOUD_URL/v1/voices" 2>/dev/null)
             http_code=$(printf '%s' "$full_response" | tail -1)
             cloud_body=$(printf '%s' "$full_response" | head -n -1)
@@ -968,6 +987,7 @@ cmd_setup_cloud() {
     new_key="${new_key#"${new_key%%[! ]*}"}"  # ltrim
     new_key="${new_key%"${new_key##*[! ]}"}"  # rtrim
     [ -z "$new_key" ] && fail "API key cannot be empty"
+    check_cloud_key "$new_key"
     [[ "$new_key" == aw_* ]] || warn "Key doesn't start with 'aw_' — proceeding anyway"
 
     local new_url
@@ -978,8 +998,7 @@ cmd_setup_cloud() {
 
     info "Testing connection..."
     local status_code
-    status_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-        -H "Authorization: Bearer $new_key" \
+    status_code=$(cloud_curl "$new_key" -s -o /dev/null -w "%{http_code}" --max-time 10 \
         "${new_url}/v1/voices" 2>/dev/null)
     case "$status_code" in
         200) ok "Connection successful" ;;
@@ -988,8 +1007,16 @@ cmd_setup_cloud() {
         *)   warn "Unexpected status ${status_code} — saving config anyway" ;;
     esac
 
-    printf 'api_key=%s\ncloud_url=%s\n' "$new_key" "$new_url" > "$CLOUD_CONFIG_FILE"
-    chmod 600 "$CLOUD_CONFIG_FILE"
+    # Write a fresh 0600 file and rename it over the old one, so the key never
+    # lands in a file (new or pre-existing) that other accounts can read.
+    local tmp_config
+    tmp_config=$(umask 077; mktemp "${CLOUD_CONFIG_FILE}.XXXXXX") \
+        || fail "Could not create ${CLOUD_CONFIG_FILE}"
+    if ! (umask 077; printf 'api_key=%s\ncloud_url=%s\n' "$new_key" "$new_url" > "$tmp_config") \
+        || ! mv -f "$tmp_config" "$CLOUD_CONFIG_FILE"; then
+        rm -f "$tmp_config"
+        fail "Could not write ${CLOUD_CONFIG_FILE}"
+    fi
     ok "Config saved to ${DIM}${CLOUD_CONFIG_FILE}${NC}"
     echo
 }
@@ -1058,9 +1085,8 @@ print('\n'.join(results))
         [ -n "$pfamily"   ] && form_args+=(-F "family=$pfamily")
 
         local full_response http_code http_body
-        full_response=$(curl -s -w "\n%{http_code}" --max-time 60 \
+        full_response=$(cloud_curl "$CLOUD_API_KEY" -s -w "\n%{http_code}" --max-time 60 \
             -X POST "${CLOUD_URL}/v1/voices" \
-            -H "Authorization: Bearer $CLOUD_API_KEY" \
             "${form_args[@]}" 2>/dev/null)
         http_code=$(printf '%s' "$full_response" | tail -1)
         http_body=$(printf '%s' "$full_response" | head -n -1)
@@ -1109,8 +1135,7 @@ cmd_pull() {
 
     # Fetch voice metadata
     local full_response http_code meta_body
-    full_response=$(curl -s -w "\n%{http_code}" --max-time 15 \
-        -H "Authorization: Bearer $CLOUD_API_KEY" \
+    full_response=$(cloud_curl "$CLOUD_API_KEY" -s -w "\n%{http_code}" --max-time 15 \
         "${CLOUD_URL}/v1/voices/${voice_id}" 2>/dev/null)
     http_code=$(printf '%s' "$full_response" | tail -1)
     meta_body=$(printf '%s' "$full_response" | head -n -1)
@@ -1133,8 +1158,7 @@ cmd_pull() {
 
     # Download reference WAV
     local wav_status
-    wav_status=$(curl -s -w "%{http_code}" --max-time 60 \
-        -H "Authorization: Bearer $CLOUD_API_KEY" \
+    wav_status=$(cloud_curl "$CLOUD_API_KEY" -s -w "%{http_code}" --max-time 60 \
         "${CLOUD_URL}/v1/voices/${voice_id}/audio" \
         -o "$target_wav" 2>/dev/null)
     if [ "$wav_status" != "200" ]; then
