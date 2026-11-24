@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
+from urllib.parse import urlsplit
 
 import backends
 from backends.base import PreparedVoice, RefTextPolicy, _read_only
@@ -101,6 +102,18 @@ app = FastAPI(title="Afterwords TTS", lifespan=lifespan)
 async def _validate_host(request, call_next):
     if _enforce_host_check and not _host_allowed(request.headers.get("host", "")):
         return JSONResponse({"error": "invalid host header"}, status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _validate_origin(request, call_next):
+    # A browser page on any site can POST multipart/form-data to 127.0.0.1
+    # without a preflight, and the Host header still passes the allowlist.
+    # Browsers always attach Origin to such requests; local CLI clients send none.
+    if request.method not in _SAFE_METHODS:
+        origin = request.headers.get("origin")
+        if origin is not None and not _origin_allowed(origin):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
     return await call_next(request)
 
 
@@ -238,6 +251,15 @@ _clone_enabled = False
 # of 16-bit 48 kHz mono — far beyond the 60 s the cloning path needs.
 MAX_CLONE_UPLOAD_BYTES = 25 * 1024 * 1024
 
+# The byte cap does not bound decoded size: FLAC/Ogg silence compresses to a
+# few bytes per block, and libsndfile takes the frame count from the header.
+# These bound what /clone will decode, checked on the open handle before any
+# samples are allocated.
+MAX_CLONE_DECODED_SECONDS = 120
+MAX_CLONE_CHANNELS = 2
+MIN_CLONE_SAMPLE_RATE = 8_000
+MAX_CLONE_SAMPLE_RATE = 96_000
+
 # Host-header allowlist (audit M3): blocks DNS-rebinding and cross-origin
 # abuse of the GPU. Enabled in main() for loopback binds; stays False under
 # TestClient (which sends Host: testserver) and for --bind-public deployments.
@@ -252,6 +274,63 @@ def _host_allowed(host_header: str) -> bool:
     else:
         hostname = host.rsplit(":", 1)[0] if ":" in host else host
     return hostname in _ALLOWED_HOSTNAMES
+
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_LOOPBACK_ORIGIN_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _origin_allowed(origin: str) -> bool:
+    """True only for an http(s) Origin on a loopback hostname. Rejects "null"."""
+    try:
+        parts = urlsplit(origin.strip())
+        hostname = parts.hostname
+        parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and hostname in _LOOPBACK_ORIGIN_HOSTNAMES
+
+
+class _CloneAudioRejected(Exception):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _decode_clone_upload(audio_bytes: bytes) -> tuple[np.ndarray, int]:
+    """Decode uploaded audio to mono float64, refusing it before samples are
+    allocated unless its rate, channel count and duration are within bounds.
+
+    Decodes from the in-memory bytes through one handle, so the metadata that
+    was checked is the stream that is read, and the read itself is frame-capped
+    in case the header under-reports its length."""
+    try:
+        with sf.SoundFile(io.BytesIO(audio_bytes)) as f:
+            sr, channels, frames = f.samplerate, f.channels, f.frames
+            if not MIN_CLONE_SAMPLE_RATE <= sr <= MAX_CLONE_SAMPLE_RATE:
+                raise _CloneAudioRejected(
+                    f"sample rate {sr} Hz outside "
+                    f"{MIN_CLONE_SAMPLE_RATE}-{MAX_CLONE_SAMPLE_RATE} Hz"
+                )
+            if not 1 <= channels <= MAX_CLONE_CHANNELS:
+                raise _CloneAudioRejected(
+                    f"{channels} channels; at most {MAX_CLONE_CHANNELS} supported"
+                )
+            max_frames = MAX_CLONE_DECODED_SECONDS * sr
+            if frames > max_frames:
+                raise _CloneAudioRejected(
+                    f"audio exceeds {MAX_CLONE_DECODED_SECONDS}s limit",
+                    status_code=413,
+                )
+            data = f.read(frames=max(0, min(frames, max_frames)), dtype="float64")
+    except RuntimeError as exc:  # sf.LibsndfileError: unknown format, corrupt stream
+        raise _CloneAudioRejected(f"unreadable audio: {exc}") from exc
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if len(data) < sr:
+        raise _CloneAudioRejected("audio too short after processing (< 1s)")
+    return data, sr
+
 
 def _register_voice(
     name: str,
@@ -605,25 +684,19 @@ async def clone_voice_endpoint(
     try:
         import noisereduce as nr
 
-        # Save uploaded audio to temp file.
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_in:
-            tmp_in.write(audio_bytes)
-            tmp_in_path = tmp_in.name
-
-        # --- Phase 1: denoise under _synth_lock (noisereduce may touch Metal) ---
+        # --- Phase 1: decode + denoise under _synth_lock (noisereduce may touch Metal) ---
         with _synth_lock:
-            data, sr_in = sf.read(tmp_in_path)
-            if data.ndim > 1:
-                data = data.mean(axis=1)
+            data, sr_in = _decode_clone_upload(audio_bytes)
+            del audio_bytes
             reduced = nr.reduce_noise(y=data, sr=sr_in, stationary=True, prop_decrease=0.7)
             peak = np.max(np.abs(reduced))
             if peak > 0:
                 reduced = reduced * (0.9 / peak)
         # --- lock released ---
+        del data
 
         duration_s = len(reduced) / sr_in
         if duration_s < 1.0:
-            os.unlink(tmp_in_path)
             return JSONResponse(
                 {"error": "audio too short after processing (< 1s)"},
                 status_code=400,
@@ -664,7 +737,7 @@ async def clone_voice_endpoint(
             try:
                 from faster_whisper import WhisperModel
                 whisper = WhisperModel("base.en", compute_type="int8")
-                segments, _ = whisper.transcribe(tmp_in_path)
+                segments, _ = whisper.transcribe(ref_path)
                 words = []
                 for seg in segments:
                     for w in seg.words or []:
@@ -679,7 +752,6 @@ async def clone_voice_endpoint(
 
         # REQUIRED-policy backends need a transcript.
         if backend_obj.ref_text_policy == RefTextPolicy.REQUIRED and not transcript:
-            os.unlink(tmp_in_path)
             try:
                 os.unlink(ref_path)
             except OSError:
@@ -694,7 +766,6 @@ async def clone_voice_endpoint(
         try:
             backend_obj.validate_extras(extras)
         except ValueError as exc:
-            os.unlink(tmp_in_path)
             try:
                 os.unlink(ref_path)
             except OSError:
@@ -707,7 +778,6 @@ async def clone_voice_endpoint(
             prepared = _run_in_ml_thread(backend_obj.prepare_voice, ref_path, transcript or None, extras)
         except Exception as exc:
                 log.error("prepare_voice failed: %s", exc, exc_info=True)
-                os.unlink(tmp_in_path)
                 try:
                     os.unlink(ref_path)
                 except OSError:
@@ -753,7 +823,6 @@ async def clone_voice_endpoint(
             },
         )
 
-        os.unlink(tmp_in_path)
         log.info(
             "cloned: %s (backend=%s, session=%s, emotion=%s, quality=%s, %.1fs)",
             voice_name, backend, session_id, emotion, quality, duration_s,
@@ -768,14 +837,11 @@ async def clone_voice_endpoint(
             "duration_s": round(duration_s, 1),
             "sequence": seq,
         }
+    except _CloneAudioRejected as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
     except Exception as exc:
         log.error("clone failed: %s", exc, exc_info=True)
         # Best-effort cleanup of any artifacts created before the failure.
-        try:
-            if 'tmp_in_path' in locals():
-                os.unlink(tmp_in_path)
-        except OSError:
-            pass
         try:
             if 'ref_path' in locals():
                 os.unlink(ref_path)
