@@ -1124,29 +1124,40 @@ cmd_pull() {
     local vname
     vname=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('name',''))" "$meta_body" 2>/dev/null)
     [ -z "$vname" ] && fail "Voice metadata is missing 'name' field"
+    # The name becomes a filename under voices/, so it must be a bare slug.
+    [[ "$vname" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,63}$ ]] \
+        || fail "Refusing voice ${voice_id}: 'name' must be 1-64 letters, digits, or hyphens"
 
     local target_json="$REPO_DIR/voices/${vname}.json"
     local target_wav="$REPO_DIR/voices/${vname}-ref.wav"
 
-    [ -f "$target_json" ] && warn "Overwriting existing profile: voices/${vname}.json"
-    [ -f "$target_wav"  ] && warn "Overwriting existing audio:   voices/${vname}-ref.wav"
+    [ -f "$target_json" ] && [ ! -L "$target_json" ] && warn "Overwriting existing profile: voices/${vname}.json"
+    [ -f "$target_wav"  ] && [ ! -L "$target_wav"  ] && warn "Overwriting existing audio:   voices/${vname}-ref.wav"
 
-    # Download reference WAV
-    local wav_status
+    # Download reference WAV into a private staging dir; nothing under voices/
+    # is touched until the install step below.
+    local stage_dir wav_status
+    stage_dir=$(mktemp -d) || fail "Could not create a temporary directory"
     wav_status=$(curl -s -w "%{http_code}" --max-time 60 \
         -H "Authorization: Bearer $CLOUD_API_KEY" \
         "${CLOUD_URL}/v1/voices/${voice_id}/audio" \
-        -o "$target_wav" 2>/dev/null)
+        -o "$stage_dir/audio.wav" 2>/dev/null)
     if [ "$wav_status" != "200" ]; then
-        rm -f "$target_wav"
+        rm -rf "$stage_dir"
         fail "Could not download audio for ${voice_id} (HTTP ${wav_status})"
     fi
 
-    # Write local JSON profile (pass data via env to avoid quoting issues)
-    META_BODY="$meta_body" VOICE_ID="$voice_id" TARGET="$target_json" VNAME="$vname" python3 -c "
-import json, os
+    # Install WAV + JSON profile (pass data via env to avoid quoting issues).
+    # Both files are written relative to an fd for voices/ and renamed into
+    # place, so a symlink or hard link at the destination is never followed.
+    local install_err
+    install_err=$(META_BODY="$meta_body" VOICE_ID="$voice_id" VNAME="$vname" \
+        VOICES_DIR="$REPO_DIR/voices" STAGED_WAV="$stage_dir/audio.wav" python3 -c "
+import json, os, re, secrets, stat, sys
 meta = json.loads(os.environ['META_BODY'])
 vname = os.environ['VNAME']
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}', vname):
+    sys.exit('voice name is not a slug')
 profile = {
     'name': vname,
     'reference_audio': f'{vname}-ref.wav',
@@ -1158,10 +1169,43 @@ if meta.get('lang') and meta['lang'] != 'en':
     profile['lang'] = meta['lang']
 if meta.get('family'):
     profile['family'] = meta['family']
-with open(os.environ['TARGET'], 'w') as f:
-    json.dump(profile, f, indent=2)
-    f.write('\n')
-"
+with open(os.environ['STAGED_WAV'], 'rb') as f:
+    wav_bytes = f.read()
+json_bytes = (json.dumps(profile, indent=2) + '\n').encode()
+
+dfd = os.open(os.environ['VOICES_DIR'], os.O_RDONLY | os.O_DIRECTORY)
+files = [(f'{vname}-ref.wav', wav_bytes), (f'{vname}.json', json_bytes)]
+for dest, _ in files:
+    try:
+        st = os.stat(dest, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(f'voices/{dest} exists and is not a regular file')
+
+staged = []
+try:
+    for dest, data in files:
+        tmp = f'.{dest}.{secrets.token_hex(8)}.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+        staged.append(tmp)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+    for (dest, _), tmp in zip(files, staged):
+        os.replace(tmp, dest, src_dir_fd=dfd, dst_dir_fd=dfd)
+    staged = []
+finally:
+    for tmp in staged:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+" 2>&1)
+    local install_rc=$?
+    rm -rf "$stage_dir"
+    if [ "$install_rc" -ne 0 ]; then
+        fail "Could not install voice ${vname}: $(printf '%s' "$install_err" | tail -1)"
+    fi
 
     local vbackend
     vbackend=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('backend','?'))" "$meta_body" 2>/dev/null)
