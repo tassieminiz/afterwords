@@ -1003,7 +1003,9 @@ def main():
     log.info("ready — %d voices, accepting requests", len(VOICES))
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port)
+    # The access log records the full request URL, and GET /synthesize carries
+    # the text being spoken in its query string.
+    uvicorn.run(app, host=args.host, port=args.port, access_log=False)
 
 
 if __name__ == "__main__":
