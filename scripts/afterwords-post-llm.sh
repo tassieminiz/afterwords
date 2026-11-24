@@ -172,7 +172,9 @@ print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:16])
     fi
 
     # Concatenate all chunks into one text for single synthesize call
-    SINGLE_WAV=$(mktemp /tmp/afterwords-msg-XXXXXX.wav)
+    MSG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/afterwords-msg.XXXXXX") || exit 0
+    trap 'rm -rf "$MSG_DIR"' EXIT
+    SINGLE_WAV="${MSG_DIR}/speech.wav"
     ENC=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))" "$CLEAN" 2>/dev/null || true)
     [ -z "$ENC" ] && exit 0
 
@@ -189,7 +191,7 @@ t = t.strip('-')[:60]
 print(t or 'voice')
 " 2>/dev/null || echo "voice")
         ARCHIVE_DIR="$HOME/.hermes/tts-archive"
-        mkdir -p "$ARCHIVE_DIR"
+        mkdir -p "$ARCHIVE_DIR" && chmod 700 "$ARCHIVE_DIR"
         ARCHIVE_MP3="${ARCHIVE_DIR}/${SLUG}-${STAMP}.mp3"
         lame --quiet -V 2 "$SINGLE_WAV" "$ARCHIVE_MP3" 2>/dev/null || true
         printf '%s\n' "$CLEAN" > "${ARCHIVE_MP3%.mp3}.txt" 2>/dev/null || true

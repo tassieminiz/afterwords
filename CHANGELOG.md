@@ -4,6 +4,10 @@ All notable changes to Afterwords. Format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Security
+
+- **Agent answers no longer pass through shared `/tmp` paths.** The Codex, Claude Code, Cursor, Gemini CLI and Antigravity hooks queued every final answer in `/tmp/codex-tts-queue-<thread>` or `/tmp/claude-tts-queue` with an unchecked `mkdir -p`, so another local user could pre-create the directory (the Codex thread id was in the world-readable `/tmp/codex-tts-watch.log`) and read each answer. Queues, worker pid/lock files and the Codex watcher log now live in per-user `~/.codex/afterwords-tts/` and `~/.claude/afterwords-tts/` (mode 0700). The new `tts-queue.py` helper refuses a symlinked or foreign-owned directory and writes each 0600 item through the directory fd it checked; workers bind to the queue dir before touching items. Worker chunk dirs and Hermes/skill temp WAVs use `mktemp -d`, and the `tts-archive` dirs are now 0700. The server's uvicorn access log no longer records query strings, so `GET /synthesize?text=…` stops copying spoken text into `/tmp/claude-tts-server.log`. Re-run `bash setup.sh` to update installed hooks.
+
 ### Fixed
 
 - **Splicing helper scripts hardened after 3-agent QA (codex/hermes/agy)** — `--voice` is validated as a slug (blocks path traversal out of `voices/`); `--match` is now a literal case-insensitive substring as documented (was an undocumented regex that crashed on `[`); profile JSONs are resolved by `reference_audio` instead of filename prefix (the prefix glob would have clobbered e.g. `avasarala-errinwright.json` when splicing `avasarala`); the scripts fail fast before touching audio when no profile exists, and refuse to overwrite a git-tracked reference WAV without `--force`; JSON writes are atomic (`tmp` + `os.replace`); degenerate/NaN spectral ratios are rejected instead of passing as "clean"; `extract-single-segment.py` now walks candidate windows best-first past music-contaminated ones instead of aborting, and scores intermediate window extensions so it actually prefers ~15 s. `scipy` is declared explicitly in `requirements-clone.txt`.

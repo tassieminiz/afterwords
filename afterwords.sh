@@ -40,7 +40,8 @@ CLOUD_CONFIG_FILE="$HOME/.afterwords-cloud"
 CLOUD_DEFAULT_URL="https://afterwords-api.adrianwedd.workers.dev"
 AFTERWORDS_SERVER_CONFIG="$HOME/.afterwords-server"
 CODEX_WATCH_PID="/tmp/codex-tts-watch.pid"
-CODEX_WATCH_LOG="/tmp/codex-tts-watch.log"
+CODEX_STATE_DIR="$HOME/.codex/afterwords-tts"
+CODEX_WATCH_LOG="${CODEX_STATE_DIR}/watch.log"
 CODEX_WATCH_SCRIPT_REL=".claude/hooks/codex-tts-watch.sh"
 MUTE_FILE="/tmp/afterwords-muted"
 
@@ -827,6 +828,8 @@ cmd_codex_hook() {
                 rm -f "$CODEX_WATCH_PID"
             fi
 
+            python3 "${REPO_DIR}/.claude/hooks/tts-queue.py" prepare "$CODEX_STATE_DIR" \
+                || fail "Refusing to use ${CODEX_STATE_DIR} for the watcher log"
             : > "$CODEX_WATCH_LOG"
             nohup env CODEX_THREAD_ID="$CODEX_THREAD_ID" PROJECT_DIR="$REPO_DIR" CODEX_WATCH_LOG="$CODEX_WATCH_LOG" \
                 bash "$watcher" >>"$CODEX_WATCH_LOG" 2>&1 &
@@ -920,7 +923,7 @@ cmd_uninstall() {
         echo -en "  ${BOLD}Remove Claude Code TTS hooks? [y/N]:${NC} "
         read -r remove_hooks
         if [[ "$remove_hooks" =~ ^[Yy] ]]; then
-            rm -f "$hooks_dir/tts-hook.sh" "$hooks_dir/tts-worker.sh" "$hooks_dir/strip-markdown.py"
+            rm -f "$hooks_dir/tts-hook.sh" "$hooks_dir/tts-worker.sh" "$hooks_dir/strip-markdown.py" "$hooks_dir/tts-queue.py"
             rm -f "$hooks_dir/tts-hook.sh.bak" "$hooks_dir/tts-worker.sh.bak"
             ok "Removed hook scripts"
 

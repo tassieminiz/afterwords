@@ -5,8 +5,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="${SCRIPT_DIR}/codex-tts-hook.sh"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CODEX_WATCH_LOG="${CODEX_WATCH_LOG:-/tmp/codex-tts-watch.log}"
+STATE_DIR="$HOME/.codex/afterwords-tts"
+CODEX_WATCH_LOG="${CODEX_WATCH_LOG:-${STATE_DIR}/watch.log}"
 DIAGNOSE=0
+
+# The log records the thread id, so it lives in the private state dir.
+python3 "${SCRIPT_DIR}/tts-queue.py" prepare "$STATE_DIR" || exit 5
 
 if [ "${1:-}" = "--diagnose" ]; then
     DIAGNOSE=1

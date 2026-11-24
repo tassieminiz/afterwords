@@ -3,11 +3,13 @@
 #
 # Cursor 1.7+ fires afterAgentResponse when the agent completes a response,
 # passing the full assistant text in the `text` field. This adapter extracts
-# it, strips markdown, and appends it to the common /tmp/claude-tts-queue/
-# dir that the existing tts-worker.sh drains. The worker and all shared
-# helpers (strip-markdown.py, chunk-text.py) are read from ~/.claude/hooks/.
+# it, strips markdown, and appends it to the common private queue
+# (~/.claude/afterwords-tts/queue/) that the existing tts-worker.sh drains. The
+# worker and all shared helpers (strip-markdown.py, chunk-text.py,
+# tts-queue.py) are read from ~/.claude/hooks/.
 #
-# Wire-up: copy this file to ~/.claude/hooks/ and configure ~/.cursor/hooks.json:
+# Wire-up: copy this file and tts-queue.py to ~/.claude/hooks/ and configure
+# ~/.cursor/hooks.json:
 #   {
 #     "version": 1,
 #     "hooks": {
@@ -29,10 +31,13 @@
 # Run `bash setup.sh` to install automatically when Cursor is detected.
 set -uo pipefail
 
-QUEUEDIR="/tmp/claude-tts-queue"
-WORKER_PID="/tmp/claude-tts-worker.pid"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="$HOME/.claude/afterwords-tts"
+WORKER_PID="${STATE_DIR}/worker.pid"
 WORKER="$HOME/.claude/hooks/tts-worker.sh"
 STRIP_MARKDOWN="$HOME/.claude/hooks/strip-markdown.py"
+QUEUE_HELPER="${SCRIPT_DIR}/tts-queue.py"
+[ -f "$QUEUE_HELPER" ] || QUEUE_HELPER="$HOME/.claude/hooks/tts-queue.py"
 
 INPUT=$(cat)
 [ -z "$INPUT" ] && exit 0
@@ -47,13 +52,7 @@ PROJECT_DIR="${PROJECT_DIR:-$PWD}"
 
 AGENT="cursor"
 
-mkdir -p "$QUEUEDIR"
-ITEM="${QUEUEDIR}/$(date +%s)-${RANDOM}.json"
-ITEM_TMP="${ITEM}.tmp"
-python3 -c "
-import json, sys
-print(json.dumps({'project_dir': sys.argv[1], 'agent': sys.argv[2], 'text': sys.argv[3]}))
-" "$PROJECT_DIR" "$AGENT" "$TEXT" > "$ITEM_TMP" && mv "$ITEM_TMP" "$ITEM"
+python3 "$QUEUE_HELPER" enqueue "$STATE_DIR" queue "$PROJECT_DIR" "$AGENT" "$TEXT" || exit 1
 
 if [ -f "$WORKER_PID" ]; then
     EXISTING=$(cat "$WORKER_PID" 2>/dev/null)

@@ -324,7 +324,7 @@ HOOKS_DIR="$HOME/.claude/hooks"
 mkdir -p "$HOOKS_DIR"
 
 # Back up existing hooks if present
-for hookfile in strip-markdown.py chunk-text.py tts-hook.sh tts-worker.sh gemini-tts-hook.sh agy-tts-hook.sh agy-session-hook.py; do
+for hookfile in strip-markdown.py chunk-text.py tts-queue.py tts-hook.sh tts-worker.sh gemini-tts-hook.sh agy-tts-hook.sh agy-session-hook.py; do
     if [ -f "$HOOKS_DIR/$hookfile" ]; then
         cp "$HOOKS_DIR/$hookfile" "$HOOKS_DIR/$hookfile.bak"
     fi
@@ -336,6 +336,9 @@ cp "$SCRIPT_DIR/strip_markdown.py" "$HOOKS_DIR/strip-markdown.py"
 # Chunk-text helper (sentence splitter for chunked TTS)
 cp "$SCRIPT_DIR/chunk_text.py" "$HOOKS_DIR/chunk-text.py"
 
+# Private per-user queue helper (used by every hook that queues speech)
+cp "$SCRIPT_DIR/.claude/hooks/tts-queue.py" "$HOOKS_DIR/tts-queue.py"
+
 # Copy CLI hook helper files if present
 [ -f "$SCRIPT_DIR/agy_session_hook.py" ] && cp "$SCRIPT_DIR/agy_session_hook.py" "$HOOKS_DIR/agy-session-hook.py"
 [ -f "$SCRIPT_DIR/.claude/hooks/gemini-tts-hook.sh" ] && cp "$SCRIPT_DIR/.claude/hooks/gemini-tts-hook.sh" "$HOOKS_DIR/gemini-tts-hook.sh" && chmod +x "$HOOKS_DIR/gemini-tts-hook.sh"
@@ -346,8 +349,8 @@ cp "$SCRIPT_DIR/chunk_text.py" "$HOOKS_DIR/chunk-text.py"
 cat > "$HOOKS_DIR/tts-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
 # Queue Claude's last response for TTS.
-QUEUEDIR="/tmp/claude-tts-queue"
-WORKER_PID="/tmp/claude-tts-worker.pid"
+STATE_DIR="$HOME/.claude/afterwords-tts"
+WORKER_PID="${STATE_DIR}/worker.pid"
 WORKER="$HOME/.claude/hooks/tts-worker.sh"
 
 # Read stdin once (hook payload JSON)
@@ -365,22 +368,7 @@ case "$AGENT" in
     Explore|Plan|general-purpose) exit 0 ;;
 esac
 
-if [ -L "$QUEUEDIR" ]; then
-  echo "afterwords: $QUEUEDIR is a symlink — refusing to use it" >&2
-  exit 1
-fi
-mkdir -p "$QUEUEDIR"
-chmod 700 "$QUEUEDIR" 2>/dev/null || true
-if [ ! -d "$QUEUEDIR" ] || [ "$(stat -f%u "$QUEUEDIR" 2>/dev/null)" != "$(id -u)" ]; then
-  echo "afterwords: $QUEUEDIR is not a directory we own — refusing to use it" >&2
-  exit 1
-fi
-ITEM="${QUEUEDIR}/$(date +%s)-${RANDOM}.json"
-ITEM_TMP="${ITEM}.tmp"
-python3 -c "
-import json, sys
-print(json.dumps({'project_dir': sys.argv[1], 'agent': sys.argv[2], 'text': sys.argv[3]}))
-" "$PWD" "$AGENT" "$TEXT" > "$ITEM_TMP" && mv "$ITEM_TMP" "$ITEM"
+python3 "$HOME/.claude/hooks/tts-queue.py" enqueue "$STATE_DIR" queue "$PWD" "$AGENT" "$TEXT" || exit 1
 
 if [ -f "$WORKER_PID" ]; then
     EXISTING=$(cat "$WORKER_PID" 2>/dev/null)
@@ -398,15 +386,17 @@ chmod +x "$HOOKS_DIR/tts-hook.sh"
 cat > "$HOOKS_DIR/tts-worker.sh" <<'WORKEREOF'
 #!/usr/bin/env bash
 set -uo pipefail
+umask 077
 
-QUEUEDIR="/tmp/claude-tts-queue"
-PIDFILE="/tmp/claude-tts-worker.pid"
-LOCKDIR="/tmp/claude-tts-worker.lock"
+STATE_DIR="$HOME/.claude/afterwords-tts"
+QUEUEDIR="${STATE_DIR}/queue"
+PIDFILE="${STATE_DIR}/worker.pid"
+LOCKDIR="${STATE_DIR}/worker.lock"
 TTS_URL="http://127.0.0.1:7860/synthesize"
 ARCHIVE_DIR="$HOME/.claude/tts-archive"
 MAX_QUEUE=10
 
-mkdir -p "$ARCHIVE_DIR"
+mkdir -p "$ARCHIVE_DIR" && chmod 700 "$ARCHIVE_DIR"
 
 PLAY_LOCK="/tmp/afterwords-play.lock"
 PLAY_PID="/tmp/afterwords-play.pid"
@@ -426,6 +416,10 @@ acquire_play_lock() {
 }
 release_play_lock() { rm -f "$PLAY_PID"; rm -rf "$PLAY_LOCK"; }
 
+python3 "$HOME/.claude/hooks/tts-queue.py" prepare "$STATE_DIR" queue || exit 1
+# Bind to the queue directory once; below, items are only touched by relative name.
+cd "$QUEUEDIR" && python3 "$HOME/.claude/hooks/tts-queue.py" check-cwd || exit 1
+
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
     if [ -f "$PIDFILE" ]; then
         HOLDER=$(cat "$PIDFILE" 2>/dev/null)
@@ -442,24 +436,13 @@ fi
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"; rm -rf "$LOCKDIR"' EXIT
 
-if [ -L "$QUEUEDIR" ]; then
-  echo "afterwords: $QUEUEDIR is a symlink — refusing to use it" >&2
-  exit 1
-fi
-mkdir -p "$QUEUEDIR"
-chmod 700 "$QUEUEDIR" 2>/dev/null || true
-if [ ! -d "$QUEUEDIR" ] || [ "$(stat -f%u "$QUEUEDIR" 2>/dev/null)" != "$(id -u)" ]; then
-  echo "afterwords: $QUEUEDIR is not a directory we own — refusing to use it" >&2
-  exit 1
-fi
-
 while true; do
     # Prune excess items (keep newest MAX_QUEUE).
     COUNT=0
     while IFS= read -r EXCESS; do
         COUNT=$((COUNT + 1))
         [ "$COUNT" -gt "$MAX_QUEUE" ] && rm -f "$EXCESS"
-    done < <(ls -1t "$QUEUEDIR"/*.json 2>/dev/null)
+    done < <(ls -1t ./*.json 2>/dev/null)
 
     # Claim oldest unclaimed item atomically via mv.
     ITEM=""
@@ -469,7 +452,7 @@ while true; do
             ITEM="$CLAIMED"
             break
         fi
-    done < <(ls -1t "$QUEUEDIR"/*.json 2>/dev/null | tail -r 2>/dev/null || ls -1 "$QUEUEDIR"/*.json 2>/dev/null | sort)
+    done < <(ls -1t ./*.json 2>/dev/null | tail -r 2>/dev/null || ls -1 ./*.json 2>/dev/null | sort)
     [ -z "$ITEM" ] && break
 
     ITEM_EVAL=$(python3 -c "
@@ -536,8 +519,7 @@ print('LINE=' + shlex.quote(d.get('text','')))
     # Split into sentence-boundary chunks and pipeline: synth-N → play-N → synth-N+1.
     # Latency-to-first-audio drops from ~30s (full blob) to ~2s (first chunk).
     CHUNK_SCRIPT="$HOME/.claude/hooks/chunk-text.py"
-    CHUNK_DIR="/tmp/claude-tts-chunks-$$"
-    mkdir -p "$CHUNK_DIR"
+    CHUNK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/claude-tts-chunks.XXXXXX") || { release_play_lock; continue; }
 
     # Collect chunks into numbered text files (Bash 3.2-compatible; no mapfile).
     NCHUNKS=0
@@ -907,6 +889,8 @@ if ! $SERVER_ONLY && { [ -d "/Applications/Cursor.app" ] || command -v cursor &>
     echo -e "  ${BOLD}Cursor IDE detected.${NC}"
 
     if [ -f "$CURSOR_HOOK_SRC" ]; then
+        mkdir -p "$(dirname "$CURSOR_HOOK_DEST")"
+        cp "$SCRIPT_DIR/.claude/hooks/tts-queue.py" "$(dirname "$CURSOR_HOOK_DEST")/tts-queue.py" 2>/dev/null
         cp "$CURSOR_HOOK_SRC" "$CURSOR_HOOK_DEST" 2>/dev/null && \
             chmod +x "$CURSOR_HOOK_DEST" 2>/dev/null
         ok "installed cursor-tts-hook.sh to ~/.claude/hooks/"
