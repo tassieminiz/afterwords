@@ -250,8 +250,9 @@ START_S="${START_S:-0}"
 
 # Extract + denoise
 info "Extracting ${START_S}s → $((START_S + 15))s..."
-TMP_SEG="/tmp/clone-segment-$$.wav"
-TMPFILES+=("$TMP_SEG")
+TMP_SEG_DIR=$(mktemp -d)
+TMPFILES+=("$TMP_SEG_DIR")
+TMP_SEG="$TMP_SEG_DIR/segment.wav"
 ffmpeg -y -i "$TMP_SRC" -ss "$START_S" -t 15 -ar "$MAX_SR" -ac 1 "$TMP_SEG" 2>/dev/null
 
 info "Denoising..."
@@ -395,8 +396,9 @@ fi
 # Test
 echo
 info "Testing synthesis..."
-TEST_WAV="/tmp/clone-test-$$.wav"
-TMPFILES+=("$TEST_WAV")
+TEST_WAV_DIR=$(mktemp -d)
+TMPFILES+=("$TEST_WAV_DIR")
+TEST_WAV="$TEST_WAV_DIR/test.wav"
 if curl -s --max-time 120 \
     "http://127.0.0.1:7860/synthesize?text=Hello.+I+am+${VOICE_NAME}.&voice=${VOICE_NAME}" \
     -o "$TEST_WAV" 2>/dev/null; then
