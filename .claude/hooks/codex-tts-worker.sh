@@ -34,6 +34,15 @@ acquire_play_lock() {
 }
 release_play_lock() { rm -f "$PLAY_PID"; rm -rf "$PLAY_LOCK"; }
 
+# The voice name becomes an archive filename, so only a plain slug is accepted.
+# The class is spelled out because bash 3.2 bracket ranges follow the locale.
+is_voice_slug() {
+    case "$1" in
+        ""|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
+    esac
+    return 0
+}
+
 mkdir -p "$ARCHIVE_DIR"
 if [ -L "$QUEUEDIR" ]; then
   echo "afterwords: $QUEUEDIR is a symlink — refusing to use it" >&2
@@ -122,10 +131,12 @@ while true; do
             VOICE=$(head -1 "$AW_FILE" 2>/dev/null | tr -d '[:space:]')
         fi
     fi
+    is_voice_slug "$VOICE" || VOICE=""
 
     if [ -z "$VOICE" ]; then
         VOICE=$(curl -s --max-time 2 "${TTS_URL%/synthesize}/health" 2>/dev/null \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_voice',''))" 2>/dev/null || true)
+        is_voice_slug "$VOICE" || VOICE=""
     fi
 
     # URL-encode voice name to handle special characters.
