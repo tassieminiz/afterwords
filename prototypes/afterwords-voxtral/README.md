@@ -35,6 +35,12 @@ python server.py --port 7861
 
 First run will download model weights.
 
+The server only answers requests whose `Host` header is `localhost`, `127.0.0.1`, or `[::1]` (any port) and returns 403 otherwise, which blocks DNS-rebinding pages from driving the GPU. Binding a non-loopback address requires `--bind-public`; clients then need a name passed with `--allowed-host` (repeatable), or the bind IP itself when `--host` is a specific address:
+
+```bash
+python server.py --host 0.0.0.0 --bind-public --allowed-host mymac.local
+```
+
 ## Test
 
 ```bash

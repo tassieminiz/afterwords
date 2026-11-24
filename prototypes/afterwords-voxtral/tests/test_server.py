@@ -17,7 +17,7 @@ def _fake_generate(**kwargs):
 
 
 def test_health_returns_ok():
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://localhost") as client:
         server._ready.set()
         response = client.get("/health")
         assert response.status_code == 200
@@ -27,7 +27,7 @@ def test_health_returns_ok():
 
 
 def test_voices_lists_default():
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://localhost") as client:
         response = client.get("/voices")
         assert response.status_code == 200
         data = response.json()
@@ -39,7 +39,7 @@ def test_synthesize_returns_wav():
     fake_model = MagicMock()
     fake_model.generate.side_effect = _fake_generate
     with patch("server._get_model", return_value=fake_model):
-        with TestClient(server.app) as client:
+        with TestClient(server.app, base_url="http://localhost") as client:
             server._ready.set()
             response = client.post(
                 "/synthesize",
@@ -51,7 +51,7 @@ def test_synthesize_returns_wav():
 
 
 def test_synthesize_rejects_unknown_voice():
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://localhost") as client:
         server._ready.set()
         response = client.post(
             "/synthesize",
