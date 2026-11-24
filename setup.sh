@@ -680,6 +680,13 @@ PLIST_NAME="com.afterwords.tts-server"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
 VENV_PYTHON="${SCRIPT_DIR}/.venv/bin/python3"
 AFTERWORDS_SERVER_CONFIG="$HOME/.afterwords-server"
+# Owner-only: launchd appends to an existing file as-is and otherwise creates
+# it with the job's umask.
+LOG_DIR="$HOME/Library/Logs/afterwords"
+LOG_FILE="${LOG_DIR}/server.log"
+mkdir -p "$LOG_DIR" && chmod 700 "$LOG_DIR" \
+    && ( umask 077 && : >> "$LOG_FILE" ) && chmod 600 "$LOG_FILE" \
+    || fail "Could not create private log file ${LOG_FILE}"
 
 {
     cat <<PLIST_HEAD
@@ -703,13 +710,16 @@ PLIST_HEAD
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key>
-    <string>/tmp/claude-tts-server.log</string>
+    <string>${LOG_FILE}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/claude-tts-server.log</string>
+    <string>${LOG_FILE}</string>
 </dict>
 </plist>
 PLIST_TAIL
 } > "$PLIST_PATH"
+if [ -e /tmp/claude-tts-server.log ]; then
+    warn "Old server log /tmp/claude-tts-server.log may hold spoken text — remove it: ${CYAN}rm -f /tmp/claude-tts-server.log${NC}"
+fi
 
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"

@@ -33,7 +33,9 @@ rule()  { echo -e "${DIM}  ─────────────────�
 # ── Constants ────────────────────────────────────────────────────
 PLIST_NAME="com.afterwords.tts-server"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
-LOG_FILE="/tmp/claude-tts-server.log"
+LOG_DIR="$HOME/Library/Logs/afterwords"
+LOG_FILE="${LOG_DIR}/server.log"
+LEGACY_LOG_FILE="/tmp/claude-tts-server.log"
 PORT=7860
 HEALTH_URL="http://localhost:${PORT}/health"
 CLOUD_CONFIG_FILE="$HOME/.afterwords-cloud"
@@ -75,9 +77,23 @@ with_17b_enabled() {
     [ -f "$AFTERWORDS_SERVER_CONFIG" ] && grep -q "^WITH_17B=true" "$AFTERWORDS_SERVER_CONFIG"
 }
 
+# Create the server log owner-only before launchd opens it. launchd appends to
+# an existing file as-is and otherwise creates it with the job's umask.
+prepare_log_file() {
+    mkdir -p "$LOG_DIR" && chmod 700 "$LOG_DIR" || return 1
+    ( umask 077 && : >> "$LOG_FILE" ) && chmod 600 "$LOG_FILE"
+}
+
+warn_legacy_log() {
+    if [ -e "$LEGACY_LOG_FILE" ]; then
+        warn "Old server log ${LEGACY_LOG_FILE} may hold spoken text — remove it: ${CYAN}rm -f ${LEGACY_LOG_FILE}${NC}"
+    fi
+}
+
 # Write (or rewrite) the launchd plist, honouring current server config
 write_plist() {
     local venv_python="${REPO_DIR}/.venv/bin/python3"
+    prepare_log_file || fail "Could not create private log file ${LOG_FILE}"
     {
         cat <<PLIST_HEAD
 <?xml version="1.0" encoding="UTF-8"?>
@@ -98,9 +114,9 @@ PLIST_HEAD
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key>
-    <string>/tmp/claude-tts-server.log</string>
+    <string>${LOG_FILE}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/claude-tts-server.log</string>
+    <string>${LOG_FILE}</string>
 </dict>
 </plist>
 PLIST_TAIL
@@ -135,6 +151,15 @@ cmd_start() {
 
     if ! plist_exists; then
         fail "No launchd plist found. Run ${CYAN}bash setup.sh${NC} first."
+    fi
+
+    if grep -qF "$LEGACY_LOG_FILE" "$PLIST_PATH" 2>/dev/null; then
+        info "Moving server log to ${LOG_FILE}..."
+        plist_loaded && launchctl unload "$PLIST_PATH" 2>/dev/null
+        write_plist
+        warn_legacy_log
+    else
+        prepare_log_file || warn "Could not create private log file ${LOG_FILE}"
     fi
 
     info "Starting afterwords..."
@@ -276,8 +301,8 @@ if voices:
     for i in range(0, len(padded), cols):
         print('    ' + ''.join(padded[i:i+cols]))
 print()
-print(f'  {D}afterwords logs  —  /tmp/claude-tts-server.log{R}')
-" 2>/dev/null || warn "Server running but /health not yet responding (warming up)"
+print(f'  {D}afterwords logs  —  {sys.argv[1]}{R}')
+" "$LOG_FILE" 2>/dev/null || warn "Server running but /health not yet responding (warming up)"
     fi
     echo
 }
