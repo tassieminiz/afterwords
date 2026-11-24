@@ -49,6 +49,41 @@ SUPPORTED_VOICES = (
 
 app = FastAPI(title="Afterwords Voxtral Prototype")
 
+_LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "[::1]"}
+_ALLOWED_FETCH_SITES = {"same-origin", "none"}
+
+
+def _browser_request_allowed(headers) -> bool:
+    """Reject requests a browser sends on behalf of another site.
+
+    A page on any site can POST to 127.0.0.1 without a preflight (a Blob body
+    sends no Content-Type, which FastAPI parses as JSON). Non-browser clients
+    send neither Origin nor Sec-Fetch-Site and pass.
+    """
+    for site in headers.getlist("sec-fetch-site"):
+        if site.strip().lower() not in _ALLOWED_FETCH_SITES:
+            return False
+    origins = [o.strip().lower() for o in headers.getlist("origin")]
+    origins = [o for o in origins if o]
+    if not origins:
+        return True
+    host = headers.get("host", "").strip().lower()
+    if host.startswith("["):
+        hostname = host.split("]")[0] + "]"
+    else:
+        hostname = host.rsplit(":", 1)[0]
+    if hostname not in _LOOPBACK_HOSTNAMES:
+        return False
+    return all(origin == f"http://{host}" for origin in origins)
+
+
+@app.middleware("http")
+async def _reject_cross_site(request, call_next):
+    if not _browser_request_allowed(request.headers):
+        return JSONResponse({"error": "cross-site request rejected"}, status_code=403)
+    return await call_next(request)
+
+
 _model = None
 _model_lock = threading.Lock()
 _synth_lock = threading.Lock()

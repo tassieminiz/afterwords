@@ -105,6 +105,15 @@ async def _validate_host(request, call_next):
 
 
 @app.middleware("http")
+async def _reject_cross_site(request, call_next):
+    # Runs for every bind mode and before any body is read, so a rejected
+    # /clone upload is never spooled or parsed.
+    if not _browser_request_allowed(request.headers):
+        return JSONResponse({"error": "cross-site request rejected"}, status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def _limit_clone_body(request, call_next):
     # Reject oversized /clone uploads by Content-Length BEFORE multipart parsing
     # spools the body to a temp file (audit follow-up: the in-handler read() cap
@@ -238,9 +247,11 @@ _clone_enabled = False
 # of 16-bit 48 kHz mono — far beyond the 60 s the cloning path needs.
 MAX_CLONE_UPLOAD_BYTES = 25 * 1024 * 1024
 
-# Host-header allowlist (audit M3): blocks DNS-rebinding and cross-origin
-# abuse of the GPU. Enabled in main() for loopback binds; stays False under
-# TestClient (which sends Host: testserver) and for --bind-public deployments.
+# Host-header allowlist (audit M3): blocks DNS rebinding. Enabled in main() for
+# loopback binds; stays False under TestClient (which sends Host: testserver)
+# and for --bind-public deployments. It does NOT stop a page on another site
+# from calling http://127.0.0.1:7860 — the browser still sends a loopback Host.
+# _browser_request_allowed covers that case.
 _enforce_host_check = False
 _ALLOWED_HOSTNAMES = {"localhost", "127.0.0.1", "[::1]"}
 
@@ -252,6 +263,31 @@ def _host_allowed(host_header: str) -> bool:
     else:
         hostname = host.rsplit(":", 1)[0] if ":" in host else host
     return hostname in _ALLOWED_HOSTNAMES
+
+
+_ALLOWED_FETCH_SITES = {"same-origin", "none"}
+
+
+def _browser_request_allowed(headers) -> bool:
+    """Reject requests a browser sends on behalf of another site.
+
+    Non-browser clients (curl, the agent hooks) send neither Origin nor
+    Sec-Fetch-Site and pass. A browser request passes only when it is
+    same-origin with a loopback Host, or is user-initiated (Sec-Fetch-Site:
+    none, e.g. typing the URL). Origin "null" (sandboxed iframes, data: URLs,
+    redirects) never matches and is rejected.
+    """
+    for site in headers.getlist("sec-fetch-site"):
+        if site.strip().lower() not in _ALLOWED_FETCH_SITES:
+            return False
+    origins = [o.strip().lower() for o in headers.getlist("origin")]
+    origins = [o for o in origins if o]
+    if not origins:
+        return True
+    host = headers.get("host", "").strip().lower()
+    if not _host_allowed(host):
+        return False
+    return all(origin == f"http://{host}" for origin in origins)
 
 def _register_voice(
     name: str,
