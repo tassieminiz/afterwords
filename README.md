@@ -432,7 +432,7 @@ DELETE /session/{id}      (--allow-clone only)
        → removes all voices for that session, cleans up temp files
 ```
 
-**Binding & limits.** The server binds to `127.0.0.1` (loopback) by default. Binding to a non-loopback address requires the explicit `--bind-public` flag, and `--allow-clone` always forces loopback regardless. `POST /clone` rejects request bodies larger than **25 MB** before parsing, and non-loopback binds enforce a Host-header allowlist. See [SECURITY.md](SECURITY.md) for the full threat model.
+**Binding & limits.** The server binds to `127.0.0.1` (loopback) by default. Binding to a non-loopback address requires the explicit `--bind-public` flag, and `--allow-clone` always forces loopback regardless. `POST /clone` rejects request bodies larger than **25 MB** before parsing, and refuses audio that decodes to more than 120 s, more than 2 channels, or a sample rate outside 8–96 kHz before any samples are decoded. State-changing requests (`POST`/`DELETE`) carrying a non-loopback `Origin` header are refused, and loopback binds enforce a Host-header allowlist. See [SECURITY.md](SECURITY.md) for the full threat model.
 
 ### The Hook
 
