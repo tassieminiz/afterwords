@@ -47,7 +47,75 @@ SUPPORTED_VOICES = (
     "hi_female",
 )
 
+# A 5000-character text where every character is a JSON-escaped surrogate
+# pair (12 bytes each) still fits.
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+
+
+class BodySizeLimitMiddleware:
+    """Answer 413 once a request body passes max_bytes, without reading the rest.
+
+    The body is read here (bounded) and replayed to the app, so neither
+    Content-Length nor a chunked body can make the app buffer more.
+    """
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    def _too_large(self) -> JSONResponse:
+        return JSONResponse(
+            {"error": f"request body too large (max {self.max_bytes} bytes)"},
+            status_code=413,
+            headers={"Connection": "close"},
+        )
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        for name, value in scope.get("headers", ()):
+            if name.lower() != b"content-length":
+                continue
+            if not value.strip().isdigit():
+                response = JSONResponse(
+                    {"error": "invalid content-length"},
+                    status_code=400,
+                    headers={"Connection": "close"},
+                )
+                await response(scope, receive, send)
+                return
+            if int(value) > self.max_bytes:
+                await self._too_large()(scope, receive, send)
+                return
+
+        body = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] != "http.request":
+                return
+            body += message.get("body", b"")
+            if len(body) > self.max_bytes:
+                await self._too_large()(scope, receive, send)
+                return
+            more_body = message.get("more_body", False)
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 app = FastAPI(title="Afterwords Voxtral Prototype")
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 
 _model = None
 _model_lock = threading.Lock()
