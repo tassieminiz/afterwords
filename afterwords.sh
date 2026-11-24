@@ -1041,13 +1041,17 @@ print('\n'.join(results))
         [ -f "$pfile" ] || continue
 
         local pname pbackend pref_text pfamily pwav
-        pname=$(    python3 -c "import json; p=json.load(open('$pfile')); print(p.get('name',''))" 2>/dev/null)
-        pbackend=$( python3 -c "import json; p=json.load(open('$pfile')); print(p.get('backend','qwen3-0.6b'))" 2>/dev/null)
-        pref_text=$(python3 -c "import json; p=json.load(open('$pfile')); print(p.get('reference_text') or '')" 2>/dev/null)
-        pfamily=$(  python3 -c "import json; p=json.load(open('$pfile')); print(p.get('family') or '')" 2>/dev/null)
-        pwav=$(     python3 -c "import json; p=json.load(open('$pfile')); print(p.get('reference_audio',''))" 2>/dev/null)
+        pname=$(    python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('name',''))" "$pfile" 2>/dev/null)
+        pbackend=$( python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('backend','qwen3-0.6b'))" "$pfile" 2>/dev/null)
+        pref_text=$(python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('reference_text') or '')" "$pfile" 2>/dev/null)
+        pfamily=$(  python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('family') or '')" "$pfile" 2>/dev/null)
+        pwav=$(     python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('reference_audio',''))" "$pfile" 2>/dev/null)
 
         local wav_path="$REPO_DIR/voices/$pwav"
+        if [[ -z "$pwav" || "$pwav" == */* || "$pwav" == .* ]]; then
+            warn "Skipping ${pname}: reference audio must be a file in voices/ (${pwav})"
+            failed=$((failed + 1)); continue
+        fi
         if [ ! -f "$wav_path" ]; then
             warn "Skipping ${pname}: reference audio not found (${pwav})"
             failed=$((failed + 1)); continue
@@ -1121,9 +1125,20 @@ cmd_pull() {
         fail "Could not fetch voice ${voice_id}: ${err} (HTTP ${http_code})"
     fi
 
-    local vname
-    vname=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('name',''))" "$meta_body" 2>/dev/null)
-    [ -z "$vname" ] && fail "Voice metadata is missing 'name' field"
+    # The cloud name becomes a filename under voices/, so accept only a
+    # lowercase slug: no slashes, dots, quotes, or leading hyphen.
+    local vname name_status=0
+    vname=$(python3 -c "
+import json, re, sys
+name = json.loads(sys.argv[1]).get('name')
+if not name:
+    sys.exit(2)
+if not isinstance(name, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', name):
+    sys.exit(3)
+print(name)
+" "$meta_body" 2>/dev/null) || name_status=$?
+    [ "$name_status" -eq 3 ] && fail "Refusing to pull ${voice_id}: voice name must be lowercase letters, digits, and hyphens"
+    { [ "$name_status" -ne 0 ] || [ -z "$vname" ]; } && fail "Voice metadata is missing 'name' field"
 
     local target_json="$REPO_DIR/voices/${vname}.json"
     local target_wav="$REPO_DIR/voices/${vname}-ref.wav"
