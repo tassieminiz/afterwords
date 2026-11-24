@@ -14,7 +14,9 @@ set -euo pipefail
 TEXT="${1:?Usage: speak.sh \"text\" [voice]}"
 VOICE="${2:-}"
 PORT=7860
-OUT="/tmp/afterwords-output-$$.wav"
+OUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/afterwords-output.XXXXXX")
+trap 'rm -rf "$OUT_DIR"' EXIT
+OUT="$OUT_DIR/output.wav"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Resolve voice from .afterwords if not specified
