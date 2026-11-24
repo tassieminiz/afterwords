@@ -104,20 +104,76 @@ async def _validate_host(request, call_next):
     return await call_next(request)
 
 
-@app.middleware("http")
-async def _limit_clone_body(request, call_next):
-    # Reject oversized /clone uploads by Content-Length BEFORE multipart parsing
-    # spools the body to a temp file (audit follow-up: the in-handler read() cap
-    # bounds RAM but the parser had already spooled to disk). A lying/absent
-    # Content-Length still falls through to the in-handler read(MAX+1) cap.
-    if request.url.path == "/clone" and request.method == "POST":
-        cl = request.headers.get("content-length", "")
-        if cl.isdigit() and int(cl) > MAX_CLONE_UPLOAD_BYTES:
-            return JSONResponse(
-                {"error": f"audio exceeds {MAX_CLONE_UPLOAD_BYTES // (1024*1024)}MB limit"},
-                status_code=413,
-            )
-    return await call_next(request)
+def _body_limit_for(scope) -> tuple[int, str]:
+    if scope["method"] == "POST" and scope["path"] == "/clone":
+        return (MAX_CLONE_UPLOAD_BYTES,
+                f"audio exceeds {MAX_CLONE_UPLOAD_BYTES // (1024*1024)}MB limit")
+    return (MAX_REQUEST_BODY_BYTES,
+            f"request body exceeds {MAX_REQUEST_BODY_BYTES // 1024}KB limit")
+
+
+class _BodyLimitMiddleware:
+    """Cap every request body before FastAPI buffers or spools it.
+
+    FastAPI reads a JSON body fully into RAM (and multipart spools to disk)
+    before any handler-level size check runs, so the cap has to sit on the
+    ASGI receive channel. A declared Content-Length over the cap is refused
+    without reading a byte; otherwise bytes are counted as they arrive
+    (chunked or not) and reading stops as soon as the count crosses the cap.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        limit, error = _body_limit_for(scope)
+        reject = JSONResponse({"error": error}, status_code=413,
+                              headers={"Connection": "close"})
+        for name, value in scope["headers"]:
+            if name == b"content-length" and value.strip().isdigit() and int(value) > limit:
+                await reject(scope, receive, send)
+                return
+
+        received = 0
+        exceeded = False
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            if exceeded:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    # Present the overflow as a client disconnect so the app
+                    # abandons the body; its response is replaced by the 413.
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            nonlocal response_started
+            if exceeded and not response_started:
+                return
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not exceeded or response_started:
+                raise
+        if exceeded and not response_started:
+            await reject(scope, receive, send)
+
+
+app.add_middleware(_BodyLimitMiddleware)
 
 
 _VOICES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voices")
@@ -237,6 +293,10 @@ _clone_enabled = False
 # /clone uploads are buffered in RAM for denoising; cap them. 25 MB is ~4 min
 # of 16-bit 48 kHz mono — far beyond the 60 s the cloning path needs.
 MAX_CLONE_UPLOAD_BYTES = 25 * 1024 * 1024
+
+# Every other route takes at most a JSON body with <=5000 chars of text
+# (~20 KB even as 4-byte UTF-8), so 64 KB is ample headroom.
+MAX_REQUEST_BODY_BYTES = 64 * 1024
 
 # Host-header allowlist (audit M3): blocks DNS-rebinding and cross-origin
 # abuse of the GPU. Enabled in main() for loopback binds; stays False under
