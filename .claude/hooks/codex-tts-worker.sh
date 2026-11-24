@@ -15,6 +15,8 @@ LOCKDIR="/tmp/codex-tts-worker-${SESSION_ID}.lock"
 TTS_URL="http://127.0.0.1:7860/synthesize"
 ARCHIVE_DIR="$HOME/.codex/tts-archive"
 MAX_QUEUE=10
+# Voice names become archive filenames: no slashes, no leading dot.
+VOICE_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
 
 MUTE_FILE="/tmp/afterwords-muted"   # `afterwords mute` toggles this; skip local playback when present
 PLAY_LOCK="/tmp/afterwords-play.lock"
@@ -121,11 +123,16 @@ while true; do
         else
             VOICE=$(head -1 "$AW_FILE" 2>/dev/null | tr -d '[:space:]')
         fi
+        if [ -n "$VOICE" ] && ! [[ "$VOICE" =~ $VOICE_RE ]]; then
+            echo "afterwords: ignoring invalid voice name in $AW_FILE" >&2
+            VOICE=""
+        fi
     fi
 
     if [ -z "$VOICE" ]; then
         VOICE=$(curl -s --max-time 2 "${TTS_URL%/synthesize}/health" 2>/dev/null \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_voice',''))" 2>/dev/null || true)
+        [[ "$VOICE" =~ $VOICE_RE ]] || VOICE=""
     fi
 
     # URL-encode voice name to handle special characters.
