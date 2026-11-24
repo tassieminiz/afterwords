@@ -59,7 +59,7 @@ The tested working configuration is:
    afterwords codex-hook status
    ```
 3. Leave that Codex session running. The watcher process is detached under launchd's normal process tree (`PPID 1`) and follows only the current `$CODEX_THREAD_ID`.
-4. On each final assistant answer, the watcher reads the matching `~/.codex/sessions/.../rollout-*.jsonl`, extracts `phase=final_answer`, writes an item under `/tmp/codex-tts-queue-$CODEX_THREAD_ID/`, synthesizes through `localhost:7860/synthesize`, plays with `afplay`, and archives audio/text under `~/.codex/tts-archive/`.
+4. On each final assistant answer, the watcher reads the matching `~/.codex/sessions/.../rollout-*.jsonl`, extracts `phase=final_answer`, writes an item under the private (mode 0700) `~/.codex/afterwords-tts/queue-$CODEX_THREAD_ID/`, synthesizes through `localhost:7860/synthesize`, plays with `afplay`, and archives audio/text under `~/.codex/tts-archive/`.
 
 You can also run the session setup helper from inside Codex:
 
@@ -80,14 +80,14 @@ codex: spock
 
 If no `codex:` entry exists, it falls back to `default:`. If neither exists, it falls back to the server default voice from `/health`.
 
-For watcher debugging, run `afterwords codex-hook status`; it reports stale pid files and shows the tail of `/tmp/codex-tts-watch.log` when the watcher is not running. `afterwords codex-hook start --diagnose` prints the thread id, session file it would watch, hook path, and sample event detection without starting the daemon. The most common startup failures are `$CODEX_THREAD_ID` not being exported, or Codex not having created the first session event yet, so no `~/.codex/sessions/.../rollout-*.jsonl` file matches the thread id.
+For watcher debugging, run `afterwords codex-hook status`; it reports stale pid files and shows the tail of `~/.codex/afterwords-tts/watch.log` when the watcher is not running. `afterwords codex-hook start --diagnose` prints the thread id, session file it would watch, hook path, and sample event detection without starting the daemon. The most common startup failures are `$CODEX_THREAD_ID` not being exported, or Codex not having created the first session event yet, so no `~/.codex/sessions/.../rollout-*.jsonl` file matches the thread id.
 
 Useful checks:
 
 ```bash
 afterwords status
 afterwords codex-hook status
-tail -40 /tmp/codex-tts-watch.log
+tail -40 ~/.codex/afterwords-tts/watch.log
 ls -lt ~/.codex/tts-archive | head
 ps -p "$(cat /tmp/codex-tts-watch.pid)" -o pid=,ppid=,stat=,command=
 ```
@@ -121,7 +121,7 @@ So we ship a small adapter instead. `setup.sh` installs `~/.claude/hooks/gemini-
 Two things to know:
 
 - Gemini fires `AfterAgent` (analogue of Claude's `Stop`); there's no clean `SubagentStop` analogue, so per-agent voice mapping via `.afterwords` is Claude-only for now.
-- The adapter writes into Claude's TTS queue directory (`/tmp/claude-tts-queue/`) and the same worker drains both Claude and Gemini sessions atomically. No coordination needed.
+- The adapter writes into Claude's private TTS queue directory (`~/.claude/afterwords-tts/queue/`) and the same worker drains both Claude and Gemini sessions atomically. No coordination needed.
 
 Test: `gemini -p "say hi"` should speak the response via Afterwords using your default voice.
 
@@ -208,7 +208,7 @@ Cursor 1.7+ fires an `afterAgentResponse` hook when the agent completes a respon
 }
 ```
 
-The hook reuses the same TTS worker queue (`/tmp/claude-tts-queue/`) and `tts-worker.sh` as the Claude Code integration. Voice is resolved from `.afterwords` using the agent key `cursor`.
+The hook reuses the same private TTS worker queue (`~/.claude/afterwords-tts/queue/`) and `tts-worker.sh` as the Claude Code integration. Voice is resolved from `.afterwords` using the agent key `cursor`.
 
 ```
 cursor: lister
@@ -436,7 +436,7 @@ DELETE /session/{id}      (--allow-clone only)
 
 ### The Hook
 
-Claude Code's [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) fires after every response. The hook extracts the response text, strips markdown, and atomically writes a JSON item to the shared queue directory (`/tmp/claude-tts-queue/`). A background worker with `mkdir`-based locking (macOS has no `flock`) claims items one at a time and prevents overlapping audio via a shared play lock (`/tmp/afterwords-play.lock`) coordinated across all six CLI integrations.
+Claude Code's [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) fires after every response. The hook extracts the response text, strips markdown, and atomically writes a JSON item to the per-user queue directory (`~/.claude/afterwords-tts/queue/`, mode 0700; other local users cannot read or pre-create it). A background worker with `mkdir`-based locking (macOS has no `flock`) claims items one at a time and prevents overlapping audio via a shared play lock (`/tmp/afterwords-play.lock`) coordinated across all six CLI integrations.
 
 ### The Queue
 
