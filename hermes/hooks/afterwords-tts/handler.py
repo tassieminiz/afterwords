@@ -50,6 +50,19 @@ HERMES_AGENT = "hermes"
 # Global fallback config (read from home dir)
 GLOBAL_AFTERWORDS = Path.home() / ".afterwords"
 
+# .afterwords ships with untrusted repos and the voice becomes part of the
+# archive filename, so it must never carry path separators or dots.
+VOICE_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _safe_voice(voice: str | None) -> str | None:
+    """Return voice if it is a plain voice name, else None (server default)."""
+    if voice and VOICE_NAME_RE.fullmatch(voice):
+        return voice
+    if voice:
+        log.warning("Ignoring invalid voice name from .afterwords: %r", voice)
+    return None
+
 
 def strip_markdown(text: str) -> str:
     """Strip markdown formatting for cleaner TTS."""
@@ -134,12 +147,12 @@ def resolve_voice(context: dict) -> str | None:
     cwd = _get_cwd(context)
     if cwd:
         project_aw = Path(cwd) / ".afterwords"
-        voice = _read_afterwords(project_aw, HERMES_AGENT)
+        voice = _safe_voice(_read_afterwords(project_aw, HERMES_AGENT))
         if voice:
             log.info("Voice resolved from project .afterwords: %s (agent=%s, cwd=%s)", voice, HERMES_AGENT, cwd)
             return voice
 
-    voice = _read_afterwords(GLOBAL_AFTERWORDS, HERMES_AGENT)
+    voice = _safe_voice(_read_afterwords(GLOBAL_AFTERWORDS, HERMES_AGENT))
     if voice:
         log.info("Voice resolved from global ~/.afterwords: %s (agent=%s)", voice, HERMES_AGENT)
         return voice
@@ -325,13 +338,13 @@ async def _speak_chunked(chunks: list[str], voice: str | None = None) -> None:
 async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, session_pool=None) -> None:
     """Inner implementation: synthesize chunk N+1 while playing chunk N."""
     tag = uuid.uuid4().hex[:8]
+    voice = _safe_voice(voice)
     archive_dir = Path.home() / ".hermes" / "tts-archive"
     stamp = f"{voice or 'default'}-{_ts()}"
-    archive_base = archive_dir / stamp
     # Write text sidecar (once)
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
-        archive_base.with_suffix(".txt").write_text("\n".join(chunks))
+        (archive_dir / f"{stamp}.txt").write_text("\n".join(chunks))
     except OSError:
         pass  # archiving is best-effort
 

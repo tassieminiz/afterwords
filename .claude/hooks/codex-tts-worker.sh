@@ -33,6 +33,15 @@ acquire_play_lock() {
     echo $$ > "$PLAY_PID"
 }
 release_play_lock() { rm -f "$PLAY_PID"; rm -rf "$PLAY_LOCK"; }
+# .afterwords ships with untrusted repos and the voice becomes part of the
+# archive filename: allow only [A-Za-z0-9_-]. Characters are listed explicitly
+# because bracket ranges are locale-dependent.
+valid_voice_name() {
+    case "$1" in
+        ""|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 128 ]
+}
 
 mkdir -p "$ARCHIVE_DIR"
 if [ -L "$QUEUEDIR" ]; then
@@ -123,9 +132,11 @@ while true; do
         fi
     fi
 
+    valid_voice_name "$VOICE" || VOICE=""
     if [ -z "$VOICE" ]; then
         VOICE=$(curl -s --max-time 2 "${TTS_URL%/synthesize}/health" 2>/dev/null \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_voice',''))" 2>/dev/null || true)
+        valid_voice_name "$VOICE" || VOICE=""
     fi
 
     # URL-encode voice name to handle special characters.
