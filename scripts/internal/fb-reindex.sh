@@ -63,9 +63,9 @@ fi
 FAILED=0
 for u in "${URLS[@]}"; do
     RESPONSE=$(curl -sS -X POST \
-        -F "id=${u}" \
-        -F "scrape=true" \
-        -F "access_token=${TOKEN}" \
+        --form-string "id=${u}" \
+        --form-string "scrape=true" \
+        --form-string "access_token=${TOKEN}" \
         "https://graph.facebook.com/v19.0/")
     SUCCESS=$(printf '%s' "$RESPONSE" | python3 -c 'import sys,json
 try:
