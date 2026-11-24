@@ -31,7 +31,7 @@ acquire_play_lock() {
         fi
     done
     # noclobber + umask 077: never write through a file or symlink another user planted.
-    rm -f "$PLAY_PID"
+    rm -f "$PLAY_PID" 2>/dev/null
     if ! ( umask 077; set -C; echo $$ > "$PLAY_PID" ) 2>/dev/null; then
         rm -rf "$PLAY_LOCK"
         return 1
@@ -65,7 +65,7 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 
 trap 'rm -f "$PIDFILE"; rm -rf "$LOCKDIR"' EXIT
-rm -f "$PIDFILE"
+rm -f "$PIDFILE" 2>/dev/null
 if ! ( umask 077; set -C; echo $$ > "$PIDFILE" ) 2>/dev/null; then
     echo "afterwords: could not create $PIDFILE — refusing to run" >&2
     exit 1

@@ -140,7 +140,18 @@ with open(sys.argv[1], 'wb') as f:
             fi
             sleep 0.3
         done
-        bash -c 'echo $PPID' > "$PLAY_PID"
+        # noclobber + umask 077: never write through a file or symlink another user planted.
+        # Not wrapped in ( ) — $PPID must stay this subshell's pid.
+        rm -f "$PLAY_PID" 2>/dev/null
+        OLD_UMASK=$(umask)
+        umask 077
+        set -C
+        if ! bash -c 'echo $PPID' 2>/dev/null > "$PLAY_PID"; then
+            rm -rf "$PLAY_LOCK"
+            exit 0
+        fi
+        set +C
+        umask "$OLD_UMASK"
 
         # Synthesize
         TMP_WAV=$(mktemp /tmp/afterwords-cmd-XXXXXX.wav)

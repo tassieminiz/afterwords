@@ -436,12 +436,14 @@ else:
         local demo_text="The quick brown fox jumps over the lazy dog."
         local voices_list
         voices_list=$(echo "$HEALTH_JSON" | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin).get('voices', [])))")
+        local demo_dir
+        demo_dir=$(mktemp -d "/tmp/afterwords-demo-XXXXXX") || fail "Could not create a temp directory"
 
         for v in $voices_list; do
             local encoded
             encoded=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))" "$demo_text")
             info "Playing ${BOLD}${v}${NC}..."
-            local wavfile="/tmp/afterwords-demo-$$.wav"
+            local wavfile="$demo_dir/demo.wav"
             if curl -s --max-time 90 "http://localhost:${PORT}/synthesize?text=${encoded}&voice=${v}" -o "$wavfile" 2>/dev/null; then
                 local filesize
                 filesize=$(stat -f%z "$wavfile" 2>/dev/null || echo 0)
@@ -455,6 +457,7 @@ else:
             fi
             rm -f "$wavfile"
         done
+        rm -rf "$demo_dir"
         echo
         ok "Demo complete"
     fi
@@ -827,7 +830,10 @@ cmd_codex_hook() {
                 rm -f "$CODEX_WATCH_PID"
             fi
 
-            : > "$CODEX_WATCH_LOG"
+            # noclobber + umask 077: never truncate through a file or symlink another user planted.
+            rm -f "$CODEX_WATCH_LOG" 2>/dev/null
+            ( umask 077; set -C; : > "$CODEX_WATCH_LOG" ) 2>/dev/null \
+                || fail "Could not create ${CODEX_WATCH_LOG} — remove it and retry"
             nohup env CODEX_THREAD_ID="$CODEX_THREAD_ID" PROJECT_DIR="$REPO_DIR" CODEX_WATCH_LOG="$CODEX_WATCH_LOG" \
                 bash "$watcher" >>"$CODEX_WATCH_LOG" 2>&1 &
             pid=$!
@@ -838,7 +844,11 @@ cmd_codex_hook() {
                 codex_watch_log_tail
                 fail "Codex watcher failed to start"
             fi
-            echo "$pid" > "$CODEX_WATCH_PID"
+            rm -f "$CODEX_WATCH_PID"
+            if ! ( umask 077; set -C; echo "$pid" > "$CODEX_WATCH_PID" ) 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+                fail "Could not create ${CODEX_WATCH_PID} — remove it and retry"
+            fi
             ok "Codex watcher started (PID ${pid})"
             info "Thread: ${DIM}${CODEX_THREAD_ID}${NC}"
             info "Log: ${DIM}${CODEX_WATCH_LOG}${NC}"

@@ -25,7 +25,12 @@ acquire_play_lock() {
             sleep 0.3; w=$((w+1)); [ "$w" -gt 200 ] && return 1
         fi
     done
-    echo $$ > "$PLAY_PID"
+    # noclobber + umask 077: never write through a file or symlink another user planted.
+    rm -f "$PLAY_PID" 2>/dev/null
+    if ! ( umask 077; set -C; echo $$ > "$PLAY_PID" ) 2>/dev/null; then
+        rm -rf "$PLAY_LOCK"
+        return 1
+    fi
 }
 release_play_lock() { rm -f "$PLAY_PID"; rm -rf "$PLAY_LOCK"; }
 AFTERWORDS_HEALTH="$AFTERWORDS_URL/health"
