@@ -9,9 +9,14 @@ Usage:
 --synth      Also run synthesis tests (slow, ~10-30s per voice).
 --ref-only   Only transcribe ref WAVs, skip synthesis even if --synth is set.
 --voice NAME Test a single voice by name.
---out        Output file (default: /tmp/voice-qa.tsv)
+--out        Output file (default: $XDG_CACHE_HOME/afterwords/voice-qa.tsv,
+             falling back to ~/.cache/afterwords/voice-qa.tsv)
+
+The report holds every profile's stored transcript, so it is always written
+owner-only (0600) and atomically replaced into place: an existing file or
+symlink at the output path is swapped out, never written through.
 """
-import argparse, json, os, re, sys, tempfile, urllib.parse, urllib.request
+import argparse, json, os, re, secrets, stat, sys, tempfile, urllib.parse, urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -92,12 +97,74 @@ def build_flags(ref_wer: float, ref_lang: str, synth_wer: float | None) -> str:
     return "|".join(flags) if flags else "PASS"
 
 
+def default_report_path() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "afterwords" / "voice-qa.tsv"
+
+
+def _open_private_dir(path: Path) -> int:
+    """Return an fd for an owner-only directory at ``path``, creating it if needed.
+
+    The fd pins the directory that was checked; every later file operation is
+    relative to it, so swapping the path afterwards has no effect.
+    """
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            raise PermissionError(f"report directory {path} is not owned by the current user")
+        if stat.S_IMODE(st.st_mode) & 0o077:
+            os.fchmod(fd, 0o700)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def write_report(out: str | None, header: list, rows: list) -> Path:
+    if out:
+        target = Path(out)
+        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    else:
+        target = default_report_path()
+        dir_fd = _open_private_dir(target.parent)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        for _ in range(100):
+            tmp_name = f".{target.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError(f"could not create a temporary report in {target.parent}")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\t".join(header) + "\n")
+                for row in rows:
+                    f.write("\t".join(str(c) for c in row) + "\n")
+            # rename() replaces a symlink at the target name instead of following it.
+            os.replace(tmp_name, target.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+    return target
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--synth", action="store_true")
     ap.add_argument("--ref-only", action="store_true")
     ap.add_argument("--voice", default="")
-    ap.add_argument("--out", default="/tmp/voice-qa.tsv")
+    ap.add_argument("--out", default=None,
+                    help="Report path (default: ~/.cache/afterwords/voice-qa.tsv, mode 0600)")
     ap.add_argument("--json", action="store_true", help="Emit JSON to stdout; suppress human output")
     args = ap.parse_args()
 
@@ -193,10 +260,7 @@ def main():
             f_str,
         ])
 
-    with open(args.out, "w") as f:
-        f.write("\t".join(header) + "\n")
-        for row in rows:
-            f.write("\t".join(str(c) for c in row) + "\n")
+    report_path = write_report(args.out, header, rows)
 
     n_over = sum(1 for r in rows if float(r[1]) > REF_WER_THRESHOLD)
 
@@ -211,7 +275,7 @@ def main():
         }
         print(json.dumps(out))
     else:
-        print(f"\nResults written to {args.out}")
+        print(f"\nResults written to {report_path}")
 
         warn = [r for r in rows if "WARN" in r[-1]]
         print(f"\nSummary: {len(rows)} voices, {len(warn)} warnings")
