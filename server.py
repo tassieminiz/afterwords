@@ -63,6 +63,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("tts")
 
+
+class _DropQueryStringFilter(logging.Filter):
+    """uvicorn's access log records the full request path, and GET /synthesize
+    carries the spoken text in its query string. The server log lives in a
+    shared location (/tmp/claude-tts-server.log), so log the path only."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            record.args = (args[0], args[1], args[2].split("?", 1)[0], args[3], args[4])
+        return True
+
 # Suppress known harmless warnings from mlx-audio model loading
 warnings.filterwarnings("ignore", message=".*model of type.*qwen3_tts.*")
 warnings.filterwarnings("ignore", message=".*incorrect regex pattern.*")
@@ -1003,6 +1015,7 @@ def main():
     log.info("ready — %d voices, accepting requests", len(VOICES))
 
     import uvicorn
+    logging.getLogger("uvicorn.access").addFilter(_DropQueryStringFilter())
     uvicorn.run(app, host=args.host, port=args.port)
 
 
