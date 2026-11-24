@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterable
@@ -48,6 +49,60 @@ SUPPORTED_VOICES = (
 )
 
 app = FastAPI(title="Afterwords Voxtral Prototype")
+
+_LOOPBACK_BIND_HOSTS = ("127.0.0.1", "localhost", "::1")
+_WILDCARD_BIND_HOSTS = ("0.0.0.0", "::", "")
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
+_HOST_HEADER_RE = re.compile(r"(\[[0-9a-f:.]+\]|[a-z0-9.\-]+)(?::[0-9]{1,5})?", re.ASCII)
+
+# Host-header allowlist: blocks DNS rebinding, where a browser sends requests
+# to this loopback port under an attacker-controlled hostname. Enforced on
+# every request regardless of bind; main() may only widen it with names the
+# operator passes explicitly.
+_allowed_hostnames: frozenset[str] = _LOOPBACK_HOSTNAMES
+
+
+def _host_allowed(host_header: str) -> bool:
+    match = _HOST_HEADER_RE.fullmatch(host_header.lower())
+    return match is not None and match.group(1) in _allowed_hostnames
+
+
+@app.middleware("http")
+async def _validate_host(request, call_next):
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1 or not _host_allowed(hosts[0]):
+        # HEAD responses carry no body, so the reason also goes in a header.
+        return JSONResponse(
+            {"error": "invalid host header"},
+            status_code=403,
+            headers={"X-Error": "invalid host header"},
+        )
+    return await call_next(request)
+
+
+def _normalize_hostname(raw: str) -> str:
+    name = raw.strip().lower()
+    if ":" in name and not name.startswith("["):
+        name = f"[{name}]"
+    match = _HOST_HEADER_RE.fullmatch(name)
+    if match is None or match.group(1) != name:
+        raise SystemExit(f"invalid host name (no port, no scheme): {raw!r}")
+    return name
+
+
+def _resolve_bind(host: str, *, bind_public: bool, extra_hosts: list[str]) -> frozenset[str]:
+    """Validate the bind address and return the Host-header allowlist for it."""
+    if host not in _LOOPBACK_BIND_HOSTS and not bind_public:
+        raise SystemExit(
+            f"refusing to bind {host}: non-loopback binds expose the GPU to the "
+            "network. Re-run with --bind-public if this is intentional."
+        )
+    allowed = set(_LOOPBACK_HOSTNAMES)
+    if host not in _LOOPBACK_BIND_HOSTS and host not in _WILDCARD_BIND_HOSTS:
+        allowed.add(_normalize_hostname(host))
+    allowed.update(_normalize_hostname(h) for h in extra_hosts)
+    return frozenset(allowed)
+
 
 _model = None
 _model_lock = threading.Lock()
@@ -182,7 +237,24 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7861)
     parser.add_argument("--no-warmup", action="store_true")
+    parser.add_argument(
+        "--bind-public",
+        action="store_true",
+        help="Allow binding a non-loopback address (exposes synthesis to the network)",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Extra hostname or IP clients may send in the Host header (repeatable)",
+    )
     args = parser.parse_args()
+
+    global _allowed_hostnames
+    _allowed_hostnames = _resolve_bind(
+        args.host, bind_public=args.bind_public, extra_hosts=args.allowed_host
+    )
 
     if not args.no_warmup:
         try:
