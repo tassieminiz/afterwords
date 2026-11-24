@@ -5,7 +5,17 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="${SCRIPT_DIR}/codex-tts-hook.sh"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CODEX_WATCH_LOG="${CODEX_WATCH_LOG:-/tmp/codex-tts-watch.log}"
+if [ -z "${CODEX_WATCH_LOG:-}" ]; then
+    # Same private per-user directory afterwords.sh uses; never a shared /tmp path.
+    CODEX_WATCH_DIR="${HOME}/.codex/afterwords"
+    mkdir -p "$CODEX_WATCH_DIR" 2>/dev/null
+    if [ -L "$CODEX_WATCH_DIR" ] || [ ! -d "$CODEX_WATCH_DIR" ] || [ ! -O "$CODEX_WATCH_DIR" ]; then
+        echo "afterwords: ${CODEX_WATCH_DIR} is not a directory owned by you — refusing to use it" >&2
+        exit 1
+    fi
+    chmod 700 "$CODEX_WATCH_DIR" || exit 1
+    CODEX_WATCH_LOG="${CODEX_WATCH_DIR}/codex-tts-watch.log"
+fi
 DIAGNOSE=0
 
 if [ "${1:-}" = "--diagnose" ]; then

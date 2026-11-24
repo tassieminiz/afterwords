@@ -39,8 +39,11 @@ HEALTH_URL="http://localhost:${PORT}/health"
 CLOUD_CONFIG_FILE="$HOME/.afterwords-cloud"
 CLOUD_DEFAULT_URL="https://afterwords-api.adrianwedd.workers.dev"
 AFTERWORDS_SERVER_CONFIG="$HOME/.afterwords-server"
-CODEX_WATCH_PID="/tmp/codex-tts-watch.pid"
-CODEX_WATCH_LOG="/tmp/codex-tts-watch.log"
+# Per-user and mode 700: a shared /tmp path lets other local users plant
+# symlinks (log clobber) or pid files (kill/deny) before we open them.
+CODEX_WATCH_DIR="$HOME/.codex/afterwords"
+CODEX_WATCH_PID="${CODEX_WATCH_DIR}/codex-tts-watch.pid"
+CODEX_WATCH_LOG="${CODEX_WATCH_DIR}/codex-tts-watch.log"
 CODEX_WATCH_SCRIPT_REL=".claude/hooks/codex-tts-watch.sh"
 MUTE_FILE="/tmp/afterwords-muted"
 
@@ -804,6 +807,27 @@ cmd_codex_hook() {
         fi
     }
 
+    codex_watch_dir_ready() {
+        mkdir -p "$CODEX_WATCH_DIR" 2>/dev/null
+        if [ -L "$CODEX_WATCH_DIR" ] || [ ! -d "$CODEX_WATCH_DIR" ] || [ ! -O "$CODEX_WATCH_DIR" ]; then
+            fail "${CODEX_WATCH_DIR} is not a directory owned by you — refusing to use it"
+        fi
+        chmod 700 "$CODEX_WATCH_DIR" || fail "Could not restrict ${CODEX_WATCH_DIR} to mode 700"
+    }
+
+    # A pid file can outlive its watcher and the pid be reused, so a live pid
+    # only counts if that process is running the watcher script.
+    codex_watch_is_watcher() {
+        case "$1" in ''|*[!0-9]*) return 1 ;; esac
+        kill -0 "$1" 2>/dev/null || return 1
+        case "$(ps -p "$1" -o command= 2>/dev/null)" in
+            *"/${CODEX_WATCH_SCRIPT_REL}"*) return 0 ;;
+        esac
+        return 1
+    }
+
+    codex_watch_dir_ready
+
     case "$subcommand" in
         start)
             diagnose="${2:-}"
@@ -818,7 +842,7 @@ cmd_codex_hook() {
 
             if [ -f "$CODEX_WATCH_PID" ]; then
                 pid=$(cat "$CODEX_WATCH_PID" 2>/dev/null)
-                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                if codex_watch_is_watcher "$pid"; then
                     ok "Codex watcher already running (PID ${pid})"
                     info "Thread: ${DIM}${CODEX_THREAD_ID}${NC}"
                     info "Log: ${DIM}${CODEX_WATCH_LOG}${NC}"
@@ -850,10 +874,10 @@ cmd_codex_hook() {
             fi
 
             pid=$(cat "$CODEX_WATCH_PID" 2>/dev/null)
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if codex_watch_is_watcher "$pid"; then
                 kill "$pid" 2>/dev/null || true
                 sleep 1
-                if kill -0 "$pid" 2>/dev/null; then
+                if codex_watch_is_watcher "$pid"; then
                     kill -9 "$pid" 2>/dev/null || true
                 fi
                 ok "Codex watcher stopped"
@@ -865,7 +889,7 @@ cmd_codex_hook() {
         status)
             if [ -f "$CODEX_WATCH_PID" ]; then
                 pid=$(cat "$CODEX_WATCH_PID" 2>/dev/null)
-                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                if codex_watch_is_watcher "$pid"; then
                     ok "Codex watcher running (PID ${pid})"
                 else
                     warn "Codex watcher pid file exists but process is not running"

@@ -80,16 +80,16 @@ codex: spock
 
 If no `codex:` entry exists, it falls back to `default:`. If neither exists, it falls back to the server default voice from `/health`.
 
-For watcher debugging, run `afterwords codex-hook status`; it reports stale pid files and shows the tail of `/tmp/codex-tts-watch.log` when the watcher is not running. `afterwords codex-hook start --diagnose` prints the thread id, session file it would watch, hook path, and sample event detection without starting the daemon. The most common startup failures are `$CODEX_THREAD_ID` not being exported, or Codex not having created the first session event yet, so no `~/.codex/sessions/.../rollout-*.jsonl` file matches the thread id.
+For watcher debugging, run `afterwords codex-hook status`; it reports stale pid files and shows the tail of `~/.codex/afterwords/codex-tts-watch.log` when the watcher is not running. `afterwords codex-hook start --diagnose` prints the thread id, session file it would watch, hook path, and sample event detection without starting the daemon. The most common startup failures are `$CODEX_THREAD_ID` not being exported, or Codex not having created the first session event yet, so no `~/.codex/sessions/.../rollout-*.jsonl` file matches the thread id.
 
 Useful checks:
 
 ```bash
 afterwords status
 afterwords codex-hook status
-tail -40 /tmp/codex-tts-watch.log
+tail -40 ~/.codex/afterwords/codex-tts-watch.log
 ls -lt ~/.codex/tts-archive | head
-ps -p "$(cat /tmp/codex-tts-watch.pid)" -o pid=,ppid=,stat=,command=
+ps -p "$(cat ~/.codex/afterwords/codex-tts-watch.pid)" -o pid=,ppid=,stat=,command=
 ```
 
 Trade-offs vs Claude Code: this depends on Codex's local session file format and on `$CODEX_THREAD_ID` being exported, both undocumented contracts that may shift between Codex versions. API-hosted or non-interactive Codex environments may reap long-lived background watcher processes; use the watcher from a real interactive Codex CLI terminal. For non-interactive Codex (`codex exec`), prefer wrapping with `--output-last-message <FILE>` and feeding the file to `/synthesize` directly — cleaner and version-stable.
