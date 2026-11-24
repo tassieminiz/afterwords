@@ -22,7 +22,16 @@ TEXT=$(printf '%s' "$INPUT" | python3 "${REPO_DIR}/codex_session_hook.py" --stri
 PROJECT_DIR="${PROJECT_DIR:-$PWD}"
 AGENT="${AGENT_TYPE:-}"
 
+if [ -L "$QUEUEDIR" ]; then
+  echo "afterwords: $QUEUEDIR is a symlink — refusing to use it" >&2
+  exit 1
+fi
 mkdir -p "$QUEUEDIR"
+chmod 700 "$QUEUEDIR" 2>/dev/null || true
+if [ ! -d "$QUEUEDIR" ] || [ "$(stat -f%u "$QUEUEDIR" 2>/dev/null)" != "$(id -u)" ]; then
+  echo "afterwords: $QUEUEDIR is not a directory we own — refusing to use it" >&2
+  exit 1
+fi
 # Timestamp: seconds + random suffix (date +%3N is GNU-only, not available on macOS bash 3.2)
 ITEM="${QUEUEDIR}/$(date +%s)-${RANDOM}.json"
 ITEM_TMP="${ITEM}.tmp"

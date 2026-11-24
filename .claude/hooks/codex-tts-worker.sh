@@ -30,7 +30,12 @@ acquire_play_lock() {
             sleep 0.3; w=$((w+1)); [ "$w" -gt 200 ] && return 1
         fi
     done
-    echo $$ > "$PLAY_PID"
+    # noclobber + umask 077: never write through a file or symlink another user planted.
+    rm -f "$PLAY_PID" 2>/dev/null
+    if ! ( umask 077; set -C; echo $$ > "$PLAY_PID" ) 2>/dev/null; then
+        rm -rf "$PLAY_LOCK"
+        return 1
+    fi
 }
 release_play_lock() { rm -f "$PLAY_PID"; rm -rf "$PLAY_LOCK"; }
 
@@ -59,8 +64,12 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
     fi
 fi
 
-echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"; rm -rf "$LOCKDIR"' EXIT
+rm -f "$PIDFILE" 2>/dev/null
+if ! ( umask 077; set -C; echo $$ > "$PIDFILE" ) 2>/dev/null; then
+    echo "afterwords: could not create $PIDFILE — refusing to run" >&2
+    exit 1
+fi
 
 while true; do
     # Prune excess items (keep newest MAX_QUEUE). Bash 3.2-compatible: no mapfile.
@@ -138,8 +147,8 @@ while true; do
     acquire_play_lock || continue
     CHUNK_SCRIPT="${REPO_DIR}/chunk_text.py"
     [ -f "$CHUNK_SCRIPT" ] || CHUNK_SCRIPT="$HOME/.claude/hooks/chunk-text.py"
-    CHUNK_DIR="/tmp/codex-tts-chunks-${SESSION_ID}-$$"
-    mkdir -p "$CHUNK_DIR"
+    # Fresh 0700 dir from mktemp: a predictable /tmp name can be pre-created by another user.
+    CHUNK_DIR=$(mktemp -d "/tmp/codex-tts-chunks-$$-XXXXXX") || { release_play_lock; continue; }
 
     ARCHIVE_BASE="$ARCHIVE_DIR/${VOICE:-default}-${STAMP}"
     printf '%s\n' "$TEXT" > "${ARCHIVE_BASE}.txt"
