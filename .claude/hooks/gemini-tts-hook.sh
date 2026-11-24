@@ -5,18 +5,22 @@
 # differs from Claude's: it sends `.prompt_response` rather than
 # `.last_assistant_message`, and `.hook_event_name` instead of agent_type. This
 # adapter normalises and re-emits in the format the existing Claude TTS hook +
-# worker already understand, then reuses the same /tmp/claude-tts-queue/ dir and
-# /tmp/claude-tts-worker.pid so a single worker drains both sources.
+# worker already understand, then reuses the same private queue
+# (~/.claude/afterwords-tts/queue/) and worker pid file so a single worker
+# drains both sources.
 #
 # Wire-up: drop this in ~/.claude/hooks/ (or wherever your Claude tts-hook.sh
 # lives) and reference it from ~/.gemini/settings.json. See README "With Gemini
 # CLI" for the JSON snippet.
 set -uo pipefail
 
-QUEUEDIR="/tmp/claude-tts-queue"
-WORKER_PID="/tmp/claude-tts-worker.pid"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="$HOME/.claude/afterwords-tts"
+WORKER_PID="${STATE_DIR}/worker.pid"
 WORKER="$HOME/.claude/hooks/tts-worker.sh"
 STRIP_MARKDOWN="$HOME/.claude/hooks/strip-markdown.py"
+QUEUE_HELPER="${SCRIPT_DIR}/tts-queue.py"
+[ -f "$QUEUE_HELPER" ] || QUEUE_HELPER="$HOME/.claude/hooks/tts-queue.py"
 
 INPUT=$(cat)
 [ -z "$INPUT" ] && exit 0
@@ -32,13 +36,7 @@ TEXT=$(printf '%s' "$INPUT" | jq -r '.prompt_response // .last_assistant_message
 # voice via .afterwords mapping.
 AGENT="gemini"
 
-mkdir -p "$QUEUEDIR"
-ITEM="${QUEUEDIR}/$(date +%s)-${RANDOM}.json"
-ITEM_TMP="${ITEM}.tmp"
-python3 -c "
-import json, sys
-print(json.dumps({'project_dir': sys.argv[1], 'agent': sys.argv[2], 'text': sys.argv[3]}))
-" "$PWD" "$AGENT" "$TEXT" > "$ITEM_TMP" && mv "$ITEM_TMP" "$ITEM"
+python3 "$QUEUE_HELPER" enqueue "$STATE_DIR" queue "$PWD" "$AGENT" "$TEXT" || exit 1
 
 if [ -f "$WORKER_PID" ]; then
     EXISTING=$(cat "$WORKER_PID" 2>/dev/null)

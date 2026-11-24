@@ -4,14 +4,16 @@
 # Queue: directory of JSON files ($QUEUEDIR). Each file holds one item.
 # Claiming: atomic mv to *.claimed prevents two workers racing on the same item.
 set -uo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 SESSION_ID="${CODEX_THREAD_ID:-global}"
-QUEUEDIR="/tmp/codex-tts-queue-${SESSION_ID}"
-PIDFILE="/tmp/codex-tts-worker-${SESSION_ID}.pid"
-LOCKDIR="/tmp/codex-tts-worker-${SESSION_ID}.lock"
+STATE_DIR="$HOME/.codex/afterwords-tts"
+QUEUEDIR="${STATE_DIR}/queue-${SESSION_ID}"
+PIDFILE="${STATE_DIR}/worker-${SESSION_ID}.pid"
+LOCKDIR="${STATE_DIR}/worker-${SESSION_ID}.lock"
 TTS_URL="http://127.0.0.1:7860/synthesize"
 ARCHIVE_DIR="$HOME/.codex/tts-archive"
 MAX_QUEUE=10
@@ -34,17 +36,10 @@ acquire_play_lock() {
 }
 release_play_lock() { rm -f "$PLAY_PID"; rm -rf "$PLAY_LOCK"; }
 
-mkdir -p "$ARCHIVE_DIR"
-if [ -L "$QUEUEDIR" ]; then
-  echo "afterwords: $QUEUEDIR is a symlink — refusing to use it" >&2
-  exit 1
-fi
-mkdir -p "$QUEUEDIR"
-chmod 700 "$QUEUEDIR" 2>/dev/null || true
-if [ ! -d "$QUEUEDIR" ] || [ "$(stat -f%u "$QUEUEDIR" 2>/dev/null)" != "$(id -u)" ]; then
-  echo "afterwords: $QUEUEDIR is not a directory we own — refusing to use it" >&2
-  exit 1
-fi
+mkdir -p "$ARCHIVE_DIR" && chmod 700 "$ARCHIVE_DIR"
+python3 "${SCRIPT_DIR}/tts-queue.py" prepare "$STATE_DIR" "queue-${SESSION_ID}" || exit 1
+# Bind to the queue directory once; below, items are only touched by relative name.
+cd "$QUEUEDIR" && python3 "${SCRIPT_DIR}/tts-queue.py" check-cwd || exit 1
 
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
     if [ -f "$PIDFILE" ]; then
@@ -68,7 +63,7 @@ while true; do
     while IFS= read -r EXCESS; do
         COUNT=$((COUNT + 1))
         [ "$COUNT" -gt "$MAX_QUEUE" ] && rm -f "$EXCESS"
-    done < <(ls -1t "$QUEUEDIR"/*.json 2>/dev/null)
+    done < <(ls -1t ./*.json 2>/dev/null)
 
     # Claim oldest unclaimed item atomically via mv.
     ITEM=""
@@ -78,17 +73,16 @@ while true; do
             ITEM="$CLAIMED"
             break
         fi
-    done < <(ls -1t "$QUEUEDIR"/*.json 2>/dev/null | tail -r 2>/dev/null || ls -1 "$QUEUEDIR"/*.json 2>/dev/null | sort)
+    done < <(ls -1t ./*.json 2>/dev/null | tail -r 2>/dev/null || ls -1 ./*.json 2>/dev/null | sort)
     [ -z "$ITEM" ] && break
 
     # Parse JSON item fields directly — avoids eval on queue content.
     PROJECT_DIR=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('project_dir',''))" "$ITEM" 2>/dev/null) || { rm -f "$ITEM"; continue; }
     AGENT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('agent',''))" "$ITEM" 2>/dev/null) || true
     TEXT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('text',''))" "$ITEM" 2>/dev/null) || { rm -f "$ITEM"; continue; }
-    rm -f "$ITEM"
-    [ -z "${TEXT:-}" ] && continue
+    [ -z "${TEXT:-}" ] && { rm -f "$ITEM"; continue; }
 
-    ENCODED=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))" "$TEXT" 2>/dev/null) || continue
+    ENCODED=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))" "$TEXT" 2>/dev/null) || { rm -f "$ITEM"; continue; }
     STAMP=$(date +%Y%m%d-%H%M%S)-$$-$RANDOM
 
     VOICE=""
@@ -135,14 +129,15 @@ while true; do
         VOICE_PARAM="&voice=${VOICE_ENC}"
     fi
 
+    # Archive before deleting the claimed item: a worker that dies here must not lose the answer.
+    ARCHIVE_BASE="$ARCHIVE_DIR/${VOICE:-default}-${STAMP}"
+    printf '%s\n' "$TEXT" > "${ARCHIVE_BASE}.txt"
+    rm -f "$ITEM"
+
     acquire_play_lock || continue
     CHUNK_SCRIPT="${REPO_DIR}/chunk_text.py"
     [ -f "$CHUNK_SCRIPT" ] || CHUNK_SCRIPT="$HOME/.claude/hooks/chunk-text.py"
-    CHUNK_DIR="/tmp/codex-tts-chunks-${SESSION_ID}-$$"
-    mkdir -p "$CHUNK_DIR"
-
-    ARCHIVE_BASE="$ARCHIVE_DIR/${VOICE:-default}-${STAMP}"
-    printf '%s\n' "$TEXT" > "${ARCHIVE_BASE}.txt"
+    CHUNK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-tts-chunks.XXXXXX") || { release_play_lock; continue; }
 
     # Collect sentence-boundary chunks (Bash 3.2-compatible: no mapfile).
     NCHUNKS=0

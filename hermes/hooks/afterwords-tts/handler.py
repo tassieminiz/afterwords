@@ -21,9 +21,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import urllib.parse
-import uuid
 from pathlib import Path
 
 try:
@@ -324,13 +325,14 @@ async def _speak_chunked(chunks: list[str], voice: str | None = None) -> None:
 
 async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, session_pool=None) -> None:
     """Inner implementation: synthesize chunk N+1 while playing chunk N."""
-    tag = uuid.uuid4().hex[:8]
+    work_dir = Path(tempfile.mkdtemp(prefix="hermes-hook-tts-"))  # mode 0700
     archive_dir = Path.home() / ".hermes" / "tts-archive"
     stamp = f"{voice or 'default'}-{_ts()}"
     archive_base = archive_dir / stamp
     # Write text sidecar (once)
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_dir.chmod(0o700)
         archive_base.with_suffix(".txt").write_text("\n".join(chunks))
     except OSError:
         pass  # archiving is best-effort
@@ -357,11 +359,11 @@ async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, sess
 
                     if wav_bytes and len(wav_bytes) > 1000:
                         # Write to temp file
-                        wav_path = Path(f"/tmp/hermes-hook-tts-{tag}-{i-1}.wav")
+                        wav_path = work_dir / f"{i-1}.wav"
                         wav_path.write_bytes(wav_bytes)
 
                         # Trim silence and play (sync — blocks until audio finishes)
-                        trimmed = Path(f"/tmp/hermes-hook-tts-trim-{tag}-{i-1}.wav")
+                        trimmed = work_dir / f"trim-{i-1}.wav"
                         ffmpeg_ok = subprocess.call(
                             ["ffmpeg", "-y", "-ss", "0.1", "-i", str(wav_path), "-c", "copy", str(trimmed)],
                             stdout=subprocess.DEVNULL,
@@ -391,10 +393,10 @@ async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, sess
             if prev_task is not None:
                 wav_bytes = await prev_task
                 if wav_bytes and len(wav_bytes) > 1000:
-                    wav_path = Path(f"/tmp/hermes-hook-tts-{tag}-last.wav")
+                    wav_path = work_dir / "last.wav"
                     wav_path.write_bytes(wav_bytes)
 
-                    trimmed = Path(f"/tmp/hermes-hook-tts-trim-{tag}-last.wav")
+                    trimmed = work_dir / "trim-last.wav"
                     ffmpeg_ok = subprocess.call(
                         ["ffmpeg", "-y", "-ss", "0.1", "-i", str(wav_path), "-c", "copy", str(trimmed)],
                         stdout=subprocess.DEVNULL,
@@ -419,6 +421,8 @@ async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, sess
     except Exception as e:
         # Fail silently — TTS is a nice-to-have
         log.warning("TTS playback error: %s", e)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _ts() -> str:

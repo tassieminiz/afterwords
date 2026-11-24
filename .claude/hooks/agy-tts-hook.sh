@@ -7,8 +7,8 @@
 #
 set -uo pipefail
 
-QUEUEDIR="/tmp/claude-tts-queue"
-WORKER_PID="/tmp/claude-tts-worker.pid"
+STATE_DIR="$HOME/.claude/afterwords-tts"
+WORKER_PID="${STATE_DIR}/worker.pid"
 WORKER="$HOME/.claude/hooks/tts-worker.sh"
 
 INPUT=$(cat)
@@ -29,13 +29,9 @@ TEXT=$(python3 "${SCRIPT_DIR}/agy-session-hook.py" "$TRANSCRIPT_PATH" 2>/dev/nul
 
 AGENT="agy"
 
-mkdir -p "$QUEUEDIR"
-ITEM="${QUEUEDIR}/$(date +%s)-${RANDOM}.json"
-ITEM_TMP="${ITEM}.tmp"
-python3 -c "
-import json, sys
-print(json.dumps({'project_dir': sys.argv[1], 'agent': sys.argv[2], 'text': sys.argv[3]}))
-" "$PROJECT_DIR" "$AGENT" "$TEXT" > "$ITEM_TMP" && mv "$ITEM_TMP" "$ITEM"
+QUEUE_HELPER="${SCRIPT_DIR}/tts-queue.py"
+[ -f "$QUEUE_HELPER" ] || QUEUE_HELPER="$HOME/.claude/hooks/tts-queue.py"
+python3 "$QUEUE_HELPER" enqueue "$STATE_DIR" queue "$PROJECT_DIR" "$AGENT" "$TEXT" || exit 1
 
 if [ -f "$WORKER_PID" ]; then
     EXISTING=$(cat "$WORKER_PID" 2>/dev/null)

@@ -153,7 +153,7 @@ with open(sys.argv[1], 'wb') as f:
             # Archive as MP3 + text sidecar — filename derived from spoken text
             STAMP=$(date +%Y%m%d-%H%M%S)
             ARCHIVE_DIR="$HOME/.hermes/tts-archive"
-            mkdir -p "$ARCHIVE_DIR"
+            mkdir -p "$ARCHIVE_DIR" && chmod 700 "$ARCHIVE_DIR"
             SLUG=$(printf '%s' "$CLEANED" | python3 -c "
 import sys, re
 t = sys.stdin.read().strip().lower()
@@ -198,7 +198,7 @@ fi
 # Archive as MP3 + text sidecar — filename derived from spoken text
 STAMP=$(date +%Y%m%d-%H%M%S)
 ARCHIVE_DIR="$HOME/.hermes/tts-archive"
-mkdir -p "$ARCHIVE_DIR"
+mkdir -p "$ARCHIVE_DIR" && chmod 700 "$ARCHIVE_DIR"
 SLUG=$(printf '%s' "$CLEANED" | python3 -c "
 import sys, re
 t = sys.stdin.read().strip().lower()

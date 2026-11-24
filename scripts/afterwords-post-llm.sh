@@ -189,7 +189,7 @@ t = t.strip('-')[:60]
 print(t or 'voice')
 " 2>/dev/null || echo "voice")
         ARCHIVE_DIR="$HOME/.hermes/tts-archive"
-        mkdir -p "$ARCHIVE_DIR"
+        mkdir -p "$ARCHIVE_DIR" && chmod 700 "$ARCHIVE_DIR"
         ARCHIVE_MP3="${ARCHIVE_DIR}/${SLUG}-${STAMP}.mp3"
         lame --quiet -V 2 "$SINGLE_WAV" "$ARCHIVE_MP3" 2>/dev/null || true
         printf '%s\n' "$CLEAN" > "${ARCHIVE_MP3%.mp3}.txt" 2>/dev/null || true
