@@ -12,10 +12,13 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import glob
+import hashlib
 import io
 import json
 import logging
 import os
+import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -84,6 +87,7 @@ def _cleanup_current_voices():
                 os.remove(profile.prepared.ref_audio_path)
             except OSError:
                 pass
+    _remove_reference_snapshots()
 
 
 @asynccontextmanager
@@ -127,6 +131,57 @@ _VOICES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voices")
 # each voice is just a ~700KB WAV + transcript string.
 # All voices are auto-discovered from JSON profiles in voices/.
 VOICES: dict[str, VoiceProfile] = {}
+
+# Server-private copies of gallery reference audio, at <content hash>/<original
+# filename> so reloading unchanged voices reuses the same file. Removed at shutdown.
+_ref_snapshot_dir: str | None = None
+_ref_snapshot_lock = threading.Lock()
+
+
+def _remove_reference_snapshots() -> None:
+    global _ref_snapshot_dir
+    with _ref_snapshot_lock:
+        if _ref_snapshot_dir is not None:
+            shutil.rmtree(_ref_snapshot_dir, ignore_errors=True)
+            _ref_snapshot_dir = None
+
+
+def _snapshot_reference(ref_audio: str) -> str | None:
+    """Copy ref_audio into a server-private file and return its path, or None
+    if it is not a regular file or is larger than MAX_CLONE_UPLOAD_BYTES.
+
+    The size limit is checked on the one open descriptor the bytes are read
+    from, and backends only ever receive the private copy, so a file that
+    grows or is swapped in voices/ after the check is never read by them."""
+    global _ref_snapshot_dir
+    # O_NONBLOCK keeps a FIFO planted as a reference from blocking the open.
+    with open(ref_audio, "rb", opener=lambda p, f: os.open(p, f | os.O_NONBLOCK)) as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_CLONE_UPLOAD_BYTES:
+            return None
+        data = fh.read(MAX_CLONE_UPLOAD_BYTES + 1)
+    if len(data) > MAX_CLONE_UPLOAD_BYTES:
+        return None
+
+    with _ref_snapshot_lock:
+        if _ref_snapshot_dir is None:
+            _ref_snapshot_dir = tempfile.mkdtemp(prefix="afterwords-refs-")
+        content_dir = os.path.join(_ref_snapshot_dir, hashlib.sha256(data).hexdigest())
+        os.makedirs(content_dir, exist_ok=True)
+        path = os.path.join(content_dir, os.path.basename(ref_audio))
+        if not os.path.exists(path):
+            fd, tmp = tempfile.mkstemp(dir=content_dir, suffix=".part")
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.write(data)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+    return path
 
 
 def _build_voice_profile(profile_path: str) -> VoiceProfile | None:
@@ -180,7 +235,19 @@ def _build_voice_profile(profile_path: str) -> VoiceProfile | None:
         log.warning("voice %r: invalid extras: %s — skipping", name, exc)
         return None
 
-    prepared = backend.prepare_voice(ref_audio, ref_text, extras)
+    try:
+        ref_snapshot = _snapshot_reference(ref_audio)
+    except OSError as exc:
+        log.warning("voice %r: cannot read ref audio %s: %s — skipping", name, ref_audio, exc)
+        return None
+    if ref_snapshot is None:
+        log.warning(
+            "voice %r: ref audio %s is not a regular file of at most %d bytes — skipping",
+            name, ref_audio, MAX_CLONE_UPLOAD_BYTES,
+        )
+        return None
+
+    prepared = backend.prepare_voice(ref_snapshot, ref_text, extras)
 
     family = p.get("family") or None  # normalize "" / missing to None
 
@@ -235,7 +302,9 @@ def _run_in_ml_thread(fn, *args, **kwargs):
 _clone_enabled = False
 
 # /clone uploads are buffered in RAM for denoising; cap them. 25 MB is ~4 min
-# of 16-bit 48 kHz mono — far beyond the 60 s the cloning path needs.
+# of 16-bit 48 kHz mono — far beyond the 60 s the cloning path needs. Gallery
+# reference audio loaded from voices/ is held to the same cap, and
+# `afterwords pull` (AFTERWORDS_MAX_REF_BYTES in afterwords.sh) must match it.
 MAX_CLONE_UPLOAD_BYTES = 25 * 1024 * 1024
 
 # Host-header allowlist (audit M3): blocks DNS-rebinding and cross-origin

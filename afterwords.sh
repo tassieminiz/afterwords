@@ -43,6 +43,9 @@ CODEX_WATCH_PID="/tmp/codex-tts-watch.pid"
 CODEX_WATCH_LOG="/tmp/codex-tts-watch.log"
 CODEX_WATCH_SCRIPT_REL=".claude/hooks/codex-tts-watch.sh"
 MUTE_FILE="/tmp/afterwords-muted"
+# Largest reference audio `pull` will save. Must equal server.py's
+# MAX_CLONE_UPLOAD_BYTES, the cap the server enforces when loading voices/.
+AFTERWORDS_MAX_REF_BYTES=$((25 * 1024 * 1024))
 
 # Resolve the repo directory (where server.py lives)
 # Allow test override of REPO_DIR
@@ -1096,6 +1099,10 @@ with open(os.environ['PFILE'], 'w') as f:
     echo
 }
 
+pull_cleanup() {
+    rm -f "${PULL_TMP_WAV:-}" "${PULL_TMP_JSON:-}" "${PULL_TMP_STATUS:-}" 2>/dev/null
+}
+
 cmd_pull() {
     local voice_id="${1:-}"
     [ -z "$voice_id" ] && fail "Usage: afterwords pull <voice-id>"
@@ -1131,19 +1138,57 @@ cmd_pull() {
     [ -f "$target_json" ] && warn "Overwriting existing profile: voices/${vname}.json"
     [ -f "$target_wav"  ] && warn "Overwriting existing audio:   voices/${vname}-ref.wav"
 
-    # Download reference WAV
-    local wav_status
-    wav_status=$(curl -s -w "%{http_code}" --max-time 60 \
+    # Download into temp files and move them into place only once the whole
+    # body has arrived within the cap, so a refused pull leaves an existing
+    # voice of the same name untouched.
+    PULL_TMP_WAV=$(mktemp "$REPO_DIR/voices/.pull-XXXXXX") \
+        || fail "Could not create a temporary file in voices/"
+    PULL_TMP_JSON=$(mktemp "$REPO_DIR/voices/.pull-XXXXXX") \
+        || { pull_cleanup; fail "Could not create a temporary file in voices/"; }
+    PULL_TMP_STATUS=$(mktemp) \
+        || { pull_cleanup; fail "Could not create a temporary file"; }
+    trap pull_cleanup EXIT
+
+    # --max-filesize refuses an oversized Content-Length up front; the limiter
+    # stops a chunked or unsized body before it writes past the same cap.
+    local wav_status curl_rc copy_rc
+    curl -s --max-time 60 --max-filesize "$AFTERWORDS_MAX_REF_BYTES" \
+        -w '%{stderr}%{http_code}' \
         -H "Authorization: Bearer $CLOUD_API_KEY" \
-        "${CLOUD_URL}/v1/voices/${voice_id}/audio" \
-        -o "$target_wav" 2>/dev/null)
+        "${CLOUD_URL}/v1/voices/${voice_id}/audio" 2>"$PULL_TMP_STATUS" \
+        | MAX_BYTES="$AFTERWORDS_MAX_REF_BYTES" OUT="$PULL_TMP_WAV" python3 -c "
+import os, sys
+limit = int(os.environ['MAX_BYTES'])
+total = 0
+with open(os.environ['OUT'], 'wb') as out:
+    while True:
+        chunk = sys.stdin.buffer.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            sys.exit(3)
+        out.write(chunk)
+"
+    local pipe_rcs=("${PIPESTATUS[@]}")
+    curl_rc=${pipe_rcs[0]}; copy_rc=${pipe_rcs[1]}
+    wav_status=$(cat "$PULL_TMP_STATUS" 2>/dev/null)
+
+    if [ "$curl_rc" -eq 63 ] || [ "$copy_rc" -eq 3 ]; then
+        pull_cleanup
+        fail "Audio for ${voice_id} exceeds the $((AFTERWORDS_MAX_REF_BYTES / 1024 / 1024)) MB reference limit — not saved"
+    fi
     if [ "$wav_status" != "200" ]; then
-        rm -f "$target_wav"
+        pull_cleanup
         fail "Could not download audio for ${voice_id} (HTTP ${wav_status})"
+    fi
+    if [ "$curl_rc" -ne 0 ] || [ "$copy_rc" -ne 0 ]; then
+        pull_cleanup
+        fail "Audio download for ${voice_id} did not complete (curl exit ${curl_rc}) — not saved"
     fi
 
     # Write local JSON profile (pass data via env to avoid quoting issues)
-    META_BODY="$meta_body" VOICE_ID="$voice_id" TARGET="$target_json" VNAME="$vname" python3 -c "
+    if ! META_BODY="$meta_body" VOICE_ID="$voice_id" TARGET="$PULL_TMP_JSON" VNAME="$vname" python3 -c "
 import json, os
 meta = json.loads(os.environ['META_BODY'])
 vname = os.environ['VNAME']
@@ -1161,7 +1206,18 @@ if meta.get('family'):
 with open(os.environ['TARGET'], 'w') as f:
     json.dump(profile, f, indent=2)
     f.write('\n')
-"
+"; then
+        pull_cleanup
+        fail "Could not write profile for ${voice_id}"
+    fi
+
+    chmod 644 "$PULL_TMP_WAV" "$PULL_TMP_JSON"
+    if ! mv -f "$PULL_TMP_WAV" "$target_wav" || ! mv -f "$PULL_TMP_JSON" "$target_json"; then
+        pull_cleanup
+        fail "Could not save voices/${vname}"
+    fi
+    pull_cleanup
+    trap - EXIT
 
     local vbackend
     vbackend=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('backend','?'))" "$meta_body" 2>/dev/null)
