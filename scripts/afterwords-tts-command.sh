@@ -143,7 +143,9 @@ with open(sys.argv[1], 'wb') as f:
         bash -c 'echo $PPID' > "$PLAY_PID"
 
         # Synthesize
-        TMP_WAV=$(mktemp /tmp/afterwords-cmd-XXXXXX.wav)
+        TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/afterwords-cmd.XXXXXX") || exit 0
+        trap 'rm -rf "$TMP_DIR"' EXIT
+        TMP_WAV="${TMP_DIR}/speech.wav"
         HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TMP_WAV" "$URL" 2>/dev/null || echo "000")
 
         if [ "$HTTP_CODE" = "200" ] && [ -s "$TMP_WAV" ]; then

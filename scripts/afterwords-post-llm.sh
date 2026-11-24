@@ -172,7 +172,9 @@ print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:16])
     fi
 
     # Concatenate all chunks into one text for single synthesize call
-    SINGLE_WAV=$(mktemp /tmp/afterwords-msg-XXXXXX.wav)
+    MSG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/afterwords-msg.XXXXXX") || exit 0
+    trap 'rm -rf "$MSG_DIR"' EXIT
+    SINGLE_WAV="${MSG_DIR}/speech.wav"
     ENC=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))" "$CLEAN" 2>/dev/null || true)
     [ -z "$ENC" ] && exit 0
 
