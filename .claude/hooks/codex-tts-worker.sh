@@ -138,8 +138,7 @@ while true; do
     acquire_play_lock || continue
     CHUNK_SCRIPT="${REPO_DIR}/chunk_text.py"
     [ -f "$CHUNK_SCRIPT" ] || CHUNK_SCRIPT="$HOME/.claude/hooks/chunk-text.py"
-    CHUNK_DIR="/tmp/codex-tts-chunks-${SESSION_ID}-$$"
-    mkdir -p "$CHUNK_DIR"
+    CHUNK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-tts-chunks.XXXXXX") || { release_play_lock; continue; }
 
     ARCHIVE_BASE="$ARCHIVE_DIR/${VOICE:-default}-${STAMP}"
     printf '%s\n' "$TEXT" > "${ARCHIVE_BASE}.txt"
