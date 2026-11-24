@@ -49,6 +49,69 @@ SUPPORTED_VOICES = (
 
 app = FastAPI(title="Afterwords Voxtral Prototype")
 
+# The only body is JSON with <=5000 chars of text (~20 KB even as 4-byte UTF-8).
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+
+
+class _BodyLimitMiddleware:
+    """Cap request bodies on the ASGI receive channel, before FastAPI buffers
+    them: refuse an oversized Content-Length unread, and stop a streamed
+    (chunked) body as soon as it crosses the cap."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        reject = JSONResponse(
+            {"error": f"request body exceeds {MAX_REQUEST_BODY_BYTES // 1024}KB limit"},
+            status_code=413,
+            headers={"Connection": "close"},
+        )
+        for name, value in scope["headers"]:
+            if (name == b"content-length" and value.strip().isdigit()
+                    and int(value) > MAX_REQUEST_BODY_BYTES):
+                await reject(scope, receive, send)
+                return
+
+        received = 0
+        exceeded = False
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            if exceeded:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > MAX_REQUEST_BODY_BYTES:
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            nonlocal response_started
+            if exceeded and not response_started:
+                return
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not exceeded or response_started:
+                raise
+        if exceeded and not response_started:
+            await reject(scope, receive, send)
+
+
+app.add_middleware(_BodyLimitMiddleware)
+
 _model = None
 _model_lock = threading.Lock()
 _synth_lock = threading.Lock()
