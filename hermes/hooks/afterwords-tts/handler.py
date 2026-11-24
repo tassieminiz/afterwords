@@ -50,6 +50,9 @@ HERMES_AGENT = "hermes"
 # Global fallback config (read from home dir)
 GLOBAL_AFTERWORDS = Path.home() / ".afterwords"
 
+# The voice name becomes an archive filename, so only a plain slug is accepted.
+_VOICE_SLUG = re.compile(r"[A-Za-z0-9_-]+")
+
 
 def strip_markdown(text: str) -> str:
     """Strip markdown formatting for cleaner TTS."""
@@ -324,6 +327,9 @@ async def _speak_chunked(chunks: list[str], voice: str | None = None) -> None:
 
 async def _speak_chunked_inner(chunks: list[str], voice: str | None = None, session_pool=None) -> None:
     """Inner implementation: synthesize chunk N+1 while playing chunk N."""
+    if voice and not _VOICE_SLUG.fullmatch(voice):
+        log.warning("Ignoring voice %r: not a plain voice name", voice)
+        voice = None
     tag = uuid.uuid4().hex[:8]
     archive_dir = Path.home() / ".hermes" / "tts-archive"
     stamp = f"{voice or 'default'}-{_ts()}"
