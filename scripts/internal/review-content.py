@@ -24,6 +24,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,9 @@ GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 CONTENT_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,120}$")
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 GITHUB_NWO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
+MAX_CONTENT_BYTES = 200_000
+MAX_QA_NOTES_BYTES = 64_000
+GEMINI_STDIN_INSTRUCTION = "Follow the review instructions above and return only the JSON object."
 
 PROMPT_TEMPLATE = """\
 You are a technical editor reviewing AI-generated content for a personal website.
@@ -163,9 +167,39 @@ def atomic_write_text(path: Path, text: str) -> None:
         print(f"WARNING: could not fsync directory {path.parent}: {e}", file=sys.stderr)
 
 
-def run_with_timeout(args: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def read_confined_text(root: Path, path: Path, limit: int) -> str:
+    """Read up to ``limit`` bytes of a regular file lexically under ``root``.
+
+    Each component below ``root`` is opened relative to the already-open parent
+    with O_NOFOLLOW, and the type check runs on the opened descriptor, so a
+    symlink anywhere in the path -- including one swapped in after an earlier
+    check -- is refused rather than read.
+    """
+    parts = path.relative_to(root).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"refusing path outside {root}: {path}")
+    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in parts[:-1]:
+            next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise ValueError(f"refusing non-regular or hard-linked file: {path.name}")
+        return fh.read(limit).decode("utf-8", errors="replace")
+
+
+def run_with_timeout(
+    args: list[str], *, env: dict[str, str], input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
     p = subprocess.Popen(
         args,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -173,7 +207,7 @@ def run_with_timeout(args: list[str], *, env: dict[str, str]) -> subprocess.Comp
         start_new_session=True,
     )
     try:
-        stdout, stderr = p.communicate(timeout=300)
+        stdout, stderr = p.communicate(input=input_text, timeout=300)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
@@ -379,16 +413,21 @@ def load_qa_notes(slug: str, frontmatter: dict) -> str:
         return "(no QA notes)"
     vid = validate_video_id(video_id)
     qa_path = QA_DIR / f"{vid}.txt"
-    if not qa_path.exists():
+    try:
+        return read_confined_text(QA_DIR, qa_path, MAX_QA_NOTES_BYTES)
+    except FileNotFoundError:
         return "(no QA notes)"
-    return qa_path.read_text()
 
 
 def collect_items() -> list[dict]:
     """Return list of {slug, path, kind, frontmatter, content}."""
     items = []
     for path in sorted(BLOG.glob("*.md")) + sorted(PROJ.glob("*.md")):
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = read_confined_text(SITE, path, MAX_CONTENT_BYTES)
+        except (OSError, ValueError) as e:
+            print(f"WARNING: skipping {path.name}: {e}", file=sys.stderr)
+            continue
         fm = parse_frontmatter(text)
         kind = "blog" if path.parent == BLOG else "project"
         slug = validate_slug(path.stem.removesuffix("-post"))
@@ -404,9 +443,11 @@ def run_gemini_review(slug: str, content: str, readme: str, qa_notes: str) -> st
         readme=sanitize_prompt_content(readme, 4000),
         qa_notes=sanitize_prompt_content(qa_notes, 2000),
     )
+    # The prompt goes on stdin: argv is world-readable via ps / /proc/<pid>/cmdline.
     result = run_with_timeout(
-        ["gemini", "--model", GEMINI_MODEL, "--output-format", "json", "-p", prompt],
+        ["gemini", "--model", GEMINI_MODEL, "--output-format", "json", "-p", GEMINI_STDIN_INSTRUCTION],
         env=minimal_env(("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+        input_text=prompt,
     )
     if result.returncode != 0:
         raise RuntimeError(f"gemini failed: {result.stderr.strip()[:500] or result.returncode}")
