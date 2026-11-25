@@ -12,8 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+import stat
 import sys
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -47,6 +49,10 @@ class Finding:
     ref_text: str
     whisper_text: str
     issues: list[str] = field(default_factory=list)
+    # Set only when the reference was opened inside voices/ and decoded.
+    wav_path: Path | None = None
+    wav_id: tuple[int, int] | None = None   # (st_dev, st_ino) of the file decoded
+    silence_gaps: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -79,9 +85,50 @@ def safe_resolve(base: Path, ref: str) -> Path | None:
     return candidate
 
 
-def load_audio(path: Path):
+def open_parent_confined(base: Path, path: Path) -> tuple[int, str]:
+    """Open the directory holding `path`, walking down from `base` without
+    following symlinks. `path` must be a resolved path inside resolved `base`
+    (see safe_resolve). A component swapped for a symlink after resolution makes
+    the walk fail rather than leave `base`. Returns (dir_fd, leaf name); the
+    caller closes dir_fd.
+    """
+    parts = path.relative_to(base.resolve()).parts
+    if not parts:
+        raise ValueError(f"not a file inside {base}: {path}")
+    fd = os.open(base.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, parts[-1]
+
+
+def read_regular_nofollow(dir_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+    """Read `name` in `dir_fd` if it is a regular file (not a symlink, FIFO, ...)."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"not a regular file: {name}")
+        return fh.read(), st
+
+
+def read_confined(base: Path, path: Path) -> tuple[bytes, os.stat_result]:
+    dir_fd, name = open_parent_confined(base, path)
+    try:
+        return read_regular_nofollow(dir_fd, name)
+    finally:
+        os.close(dir_fd)
+
+
+def load_audio(data: bytes):
     import soundfile as sf
-    audio, sr = sf.read(str(path))
+    audio, sr = sf.read(io.BytesIO(data))
     if hasattr(audio, "ndim") and audio.ndim > 1:
         audio = audio.mean(axis=1)
     return audio, sr
@@ -112,9 +159,10 @@ def detect_silence_gaps(audio, sr: int, win_s: float = 0.1) -> list[tuple[float,
     return [(a, b) for (a, b) in gaps if a > 0.3]
 
 
-def transcribe(wav_path: Path, model, lang: str | None) -> str:
+def transcribe(audio: Path | bytes, model, lang: str | None) -> str:
     kwargs = {"language": lang} if lang else {}
-    segments, _ = model.transcribe(str(wav_path), **kwargs)
+    source = io.BytesIO(audio) if isinstance(audio, bytes) else str(audio)
+    segments, _ = model.transcribe(source, **kwargs)
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 
@@ -187,16 +235,26 @@ def audit_one(json_path: Path, voices_dir: Path, whisper_cache: dict[Path, str],
             f.issues.append(f"reference_audio file not found: {ref_audio}")
         return f
 
-    audio, sr = load_audio(wav_path)
+    try:
+        data, st = read_confined(voices_dir, wav_path)
+    except (OSError, ValueError):
+        f = Finding(name, json_path, ref_audio, 0.0, ref_text, "")
+        f.issues.append(f"reference_audio escapes voices/ or is invalid: {ref_audio}")
+        return f
+
+    audio, sr = load_audio(data)
     duration = len(audio) / sr
 
     if wav_path not in whisper_cache:
-        whisper_cache[wav_path] = transcribe(wav_path, model, lang)
+        whisper_cache[wav_path] = transcribe(data, model, lang)
     whisper_text = whisper_cache[wav_path]
 
     gaps = detect_silence_gaps(audio, sr)
     finding = Finding(name, json_path, wav_path.name, duration, ref_text, whisper_text)
     finding.issues = evaluate(profile, ref_text, whisper_text, duration, gaps)
+    finding.wav_path = wav_path
+    finding.wav_id = (st.st_dev, st.st_ino)
+    finding.silence_gaps = gaps
     return finding
 
 

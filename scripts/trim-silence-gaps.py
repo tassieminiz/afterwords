@@ -13,10 +13,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import os
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -38,6 +43,64 @@ def trim_wav(src: Path, dst: Path) -> None:
         str(dst),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
+
+
+def _create_file(dir_fd: int, name: str, data: bytes, src_st: os.stat_result | None = None) -> None:
+    """Create `name` in `dir_fd`; never opens an existing entry or follows a symlink."""
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o644, dir_fd=dir_fd)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        if src_st is not None:
+            os.fchmod(fh.fileno(), stat.S_IMODE(src_st.st_mode))
+            os.utime(fh.fileno(), ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+
+
+def trim_reference(finding) -> bytes:
+    """Back up, trim, and replace the exact file the audit decoded; return the new WAV.
+
+    The file is reopened from voices/ without following symlinks and must be the
+    same (st_dev, st_ino) the audit recorded, so a reference swapped after the
+    audit is refused before anything is written.
+    """
+    import soundfile as sf
+
+    dir_fd, name = audit.open_parent_confined(VOICES, finding.wav_path)
+    try:
+        data, st = audit.read_regular_nofollow(dir_fd, name)
+        if (st.st_dev, st.st_ino) != finding.wav_id:
+            raise RuntimeError(f"{name} changed since it was audited; refusing to trim")
+        sf.info(io.BytesIO(data))
+
+        try:
+            _create_file(dir_fd, name + ".bak", data, st)
+        except FileExistsError:
+            pass
+
+        with tempfile.TemporaryDirectory() as td:
+            src, dst = Path(td) / "in.wav", Path(td) / "out.wav"
+            src.write_bytes(data)
+            trim_wav(src, dst)
+            trimmed = dst.read_bytes()
+        sf.info(io.BytesIO(trimmed))
+
+        tmp_name = f".{name}.{secrets.token_hex(4)}.trimmed"
+        _create_file(dir_fd, tmp_name, trimmed)
+        try:
+            cur = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if (cur.st_dev, cur.st_ino) != finding.wav_id:
+                raise RuntimeError(f"{name} changed while trimming; refusing to replace")
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        return trimmed
+    finally:
+        os.close(dir_fd)
 
 
 def main() -> int:
@@ -64,15 +127,14 @@ def main() -> int:
     quiet = args.json
     cache: dict[Path, str] = {}
     results: list[dict] = []                 # one entry per processed voice
-    targets: list[tuple[Path, Path, dict]] = []
+    targets: list[tuple[Path, object, dict]] = []
     for jp in profiles:
         finding = audit.audit_one(jp, VOICES, cache, model)
-        gap_count = sum(1 for i in finding.issues if "mid-clip silence" in i)
+        gap_count = len(finding.silence_gaps)
         rec = {"name": jp.stem, "gap_count": gap_count, "changed": False}
         results.append(rec)
         if gap_count > 0:
-            ref = jp.parent / json.loads(jp.read_text())["reference_audio"]
-            targets.append((jp, ref, rec))
+            targets.append((jp, finding, rec))
 
     # Dry run: emit results and stop BEFORE applying (this is the bug the QA caught)
     if not args.apply:
@@ -82,25 +144,27 @@ def main() -> int:
             print("no silence-gap voices to trim")
         else:
             print(f"would process {len(targets)} voice(s):")
-            for jp, ref, _ in targets:
-                print(f"  {jp.stem}  ({ref.name})")
+            for jp, finding, _ in targets:
+                print(f"  {jp.stem}  ({finding.wav_path.name})")
             print("\ndry run — pass --apply to actually trim and rewrite transcripts")
         return 1 if any(r["gap_count"] for r in results) else 0
 
     # Apply path
-    for jp, ref, rec in targets:
-        backup = ref.with_suffix(ref.suffix + ".bak")
-        if not backup.exists():
-            shutil.copy2(ref, backup)
-        tmp = ref.with_suffix(".trimmed.wav")
-        trim_wav(ref, tmp)
-        tmp.replace(ref)
+    if targets and shutil.which("ffmpeg") is None:
+        print("error: ffmpeg not found on PATH", file=sys.stderr)
+        return 2
+    import soundfile as sf
+    trimmed_by_id: dict[tuple[int, int], bytes] = {}   # profiles often share one WAV
+    for jp, finding, rec in targets:
+        trimmed = trimmed_by_id.get(finding.wav_id)
+        if trimmed is None:
+            trimmed = trim_reference(finding)
+            trimmed_by_id[finding.wav_id] = trimmed
 
         # Re-transcribe trimmed audio
-        new_text = audit.transcribe(ref, model, "en")
+        new_text = audit.transcribe(trimmed, model, "en")
         # Also recompute duration for the notes line
-        import soundfile as sf
-        info = sf.info(str(ref))
+        info = sf.info(io.BytesIO(trimmed))
 
         profile = json.loads(jp.read_text())
         old_text = profile.get("reference_text", "")
