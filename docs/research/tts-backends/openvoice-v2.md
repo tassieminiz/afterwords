@@ -11,8 +11,9 @@
 ```bash
 git clone https://github.com/myshell-ai/OpenVoice.git
 cd OpenVoice
+git checkout 74a1d147b17a8c3092dd5430504bd83ef6c7eb23
 pip install -r requirements.txt
-pip install git+https://github.com/myshell-ai/MeloTTS.git
+pip install git+https://github.com/myshell-ai/MeloTTS.git@209145371cff8fc3bd60d7be902ea69cbdb7965a
 python -m unidic download
 ```
 
