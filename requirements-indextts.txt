@@ -10,4 +10,7 @@
 #
 # IndexTTS-2 uses LicenseRef-Bilibili-IndexTTS, which includes usage
 # restrictions. Review the upstream license before production or commercial use.
-git+https://github.com/index-tts/index-tts.git
+#
+# Git sources must stay pinned to a full 40-hex commit (never a branch or tag);
+# review the upstream diff before bumping the SHA.
+git+https://github.com/index-tts/index-tts.git@d9e41aac89fd00b3d71497fddb287b7f24613712

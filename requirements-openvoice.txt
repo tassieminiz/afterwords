@@ -11,5 +11,7 @@
 # Afterwords install remains MLX-only.
 torch>=2.12.0
 huggingface_hub>=0.23
-git+https://github.com/myshell-ai/OpenVoice.git
-git+https://github.com/myshell-ai/MeloTTS.git
+# Git sources must stay pinned to a full 40-hex commit (never a branch or tag);
+# review the upstream diff before bumping the SHA.
+git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23
+git+https://github.com/myshell-ai/MeloTTS.git@209145371cff8fc3bd60d7be902ea69cbdb7965a
