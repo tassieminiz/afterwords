@@ -7,6 +7,9 @@
 # to PYTHONPATH when it exists, or set GPT_SOVITS_REPO_DIR:
 #   git clone https://github.com/RVC-Boss/GPT-SoVITS.git \
 #     backends/extras/gpt-sovits/GPT-SoVITS
+#   git -C backends/extras/gpt-sovits/GPT-SoVITS checkout \
+#     6d51ffceafbf240145619af4c92408a6e54b7924
+# Review the upstream diff before moving that pin.
 #
 # Download and configure weights separately; this requirements file and backend
 # do not auto-download them:
