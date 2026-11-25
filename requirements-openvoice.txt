@@ -9,7 +9,10 @@
 # The upstream OpenVoice package pins older numpy/librosa/faster-whisper
 # versions in setup.py; keep this isolated from requirements.txt so the default
 # Afterwords install remains MLX-only.
+#
+# pip runs each git requirement's setup.py at install time. Keep both pinned
+# to full commit SHAs and review the upstream diff before bumping either one.
 torch>=2.12.0
 huggingface_hub>=0.23
-git+https://github.com/myshell-ai/OpenVoice.git
-git+https://github.com/myshell-ai/MeloTTS.git
+git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23
+git+https://github.com/myshell-ai/MeloTTS.git@209145371cff8fc3bd60d7be902ea69cbdb7965a

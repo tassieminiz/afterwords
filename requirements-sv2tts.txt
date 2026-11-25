@@ -8,6 +8,9 @@
 # place checkpoints manually:
 #   git clone https://github.com/CorentinJ/Real-Time-Voice-Cloning.git \
 #     backends/extras/sv2tts/Real-Time-Voice-Cloning
+#   git -C backends/extras/sv2tts/Real-Time-Voice-Cloning checkout \
+#     890f3a03187195b9829db2079b75c2ba2ab0405c
+#   (review the upstream diff before moving that pin)
 #   mkdir -p backends/extras/sv2tts/saved_models/default
 #   # place encoder.pt, synthesizer.pt, vocoder.pt in that directory
 #

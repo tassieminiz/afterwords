@@ -7,6 +7,9 @@
 # PYTHONPATH when it exists, or set SPARK_TTS_REPO_DIR:
 #   git clone https://github.com/SparkAudio/Spark-TTS.git \
 #     backends/extras/spark-tts/Spark-TTS
+#   git -C backends/extras/spark-tts/Spark-TTS checkout \
+#     2f1ea9082400547242641f5271b6f941c9f439d1
+# Review the upstream diff before moving that pin.
 #
 # Download weights separately; the backend does not auto-download them:
 #   huggingface-cli download SparkAudio/Spark-TTS-0.5B \

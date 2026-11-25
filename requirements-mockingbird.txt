@@ -8,6 +8,11 @@
 # and place checkpoints manually:
 #   git clone https://github.com/babysor/MockingBird.git \
 #     backends/extras/mockingbird/MockingBird
+#   git -C backends/extras/mockingbird/MockingBird checkout \
+#     78fcfc46514eba39aef826a8410441306f0da2dc
+#   (the last upstream commit with top-level encoder/, synthesizer/, vocoder/
+#   inference modules, which this backend imports; review the upstream diff
+#   before moving that pin)
 #   mkdir -p backends/extras/mockingbird/saved_models/default
 #   # place encoder.pt, synthesizer.pt, vocoder.pt in that directory
 #
