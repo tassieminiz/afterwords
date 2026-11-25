@@ -17,6 +17,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,9 @@ TITLES_FILE = TRANSCRIPTS / "video-titles.tsv"
 QA_OUT = REPO / "transcripts" / "qa"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+MAX_SOURCE_BYTES = 200_000
+MAX_TRANSCRIPT_BYTES = 4_000_000
+GEMINI_STDIN_INSTRUCTION = "Follow the QA instructions above and return only the JSON object."
 
 SITE = Path("/Users/adrian/repos/adrianwedd.com/src/content")
 BLOG = SITE / "blog"
@@ -187,9 +191,39 @@ def atomic_write_text(path: Path, text: str) -> None:
         print(f"WARNING: could not fsync directory {path.parent}: {e}", file=sys.stderr)
 
 
-def run_with_timeout(args: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def read_confined_bytes(root: Path, path: Path, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes of a regular file lexically under ``root``.
+
+    Each component below ``root`` is opened relative to the already-open parent
+    with O_NOFOLLOW, and the type check runs on the opened descriptor, so a
+    symlink anywhere in the path -- including one swapped in after an earlier
+    check -- is refused rather than read.
+    """
+    parts = path.relative_to(root).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"refusing source path outside {root}: {path}")
+    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in parts[:-1]:
+            next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise ValueError(f"refusing non-regular or hard-linked file: {path.name}")
+        return fh.read(limit + 1)
+
+
+def run_with_timeout(
+    args: list[str], *, env: dict[str, str], input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
     p = subprocess.Popen(
         args,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -197,7 +231,7 @@ def run_with_timeout(args: list[str], *, env: dict[str, str]) -> subprocess.Comp
         start_new_session=True,
     )
     try:
-        stdout, stderr = p.communicate(timeout=300)
+        stdout, stderr = p.communicate(input=input_text, timeout=300)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
@@ -306,9 +340,12 @@ def load_titles() -> dict[str, str]:
 
 def transcript_to_text(path: Path) -> str:
     """Convert word-level JSON to readable text with periodic timestamps."""
+    raw = read_confined_bytes(TRANSCRIPTS, path, MAX_TRANSCRIPT_BYTES)
+    if len(raw) > MAX_TRANSCRIPT_BYTES:
+        raise ValueError(f"transcript {path.name} exceeds {MAX_TRANSCRIPT_BYTES} bytes")
     try:
-        words = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
+        words = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError(f"invalid transcript JSON in {path.name}: {e}") from e
     if not isinstance(words, list):
         raise ValueError(f"invalid transcript JSON in {path.name}: expected list")
@@ -334,20 +371,29 @@ def source_content(title: str) -> str:
         return "(no source content mapped)"
     chunks = []
     for p in paths:
-        if p.exists():
-            chunks.append(f"### {p.name}\n\n{p.read_text()}")
-        else:
+        try:
+            raw = read_confined_bytes(SITE, p, MAX_SOURCE_BYTES)
+        except FileNotFoundError:
             chunks.append(f"### {p.name}\n\n(file not found)")
+            continue
+        except (OSError, ValueError) as e:
+            print(f"WARNING: skipping source {p.name}: {e}", file=sys.stderr)
+            chunks.append(f"### {p.name}\n\n(source unavailable)")
+            continue
+        body = raw[:MAX_SOURCE_BYTES].decode("utf-8", errors="replace")
+        if len(raw) > MAX_SOURCE_BYTES:
+            body += "\n\n(source truncated)"
+        chunks.append(f"### {p.name}\n\n{body}")
     return "\n\n---\n\n".join(chunks)
 
 
 def run_qa(video_id: str, title: str) -> str:
     validate_video_id(video_id)
     transcript_path = TRANSCRIPTS / f"{video_id}.json"
-    if not transcript_path.exists():
+    try:
+        transcript_text = transcript_to_text(transcript_path)
+    except FileNotFoundError:
         return f"SKIP: no transcript for {video_id}"
-
-    transcript_text = transcript_to_text(transcript_path)
     src = source_content(title)
 
     prompt = GEMINI_PROMPT_TEMPLATE.format(
@@ -355,9 +401,11 @@ def run_qa(video_id: str, title: str) -> str:
         transcript_text=sanitize_prompt_content(transcript_text),
     )
 
+    # The prompt goes on stdin: argv is world-readable via ps / /proc/<pid>/cmdline.
     result = run_with_timeout(
-        ["gemini", "--model", GEMINI_MODEL, "--output-format", "json", "-p", prompt],
+        ["gemini", "--model", GEMINI_MODEL, "--output-format", "json", "-p", GEMINI_STDIN_INSTRUCTION],
         env=minimal_env(("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+        input_text=prompt,
     )
     output = result.stdout.strip()
     if result.returncode != 0:
